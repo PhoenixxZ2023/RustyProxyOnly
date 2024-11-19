@@ -3,15 +3,29 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
+use log::{error, info};
+use simplelog::*;
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
 fn main() {
+    // Configuração do sistema de log
+    TermLogger::init(
+        LevelFilter::Info,
+        ConfigBuilder::new()
+            .set_time_to_local(true)
+            .set_time_format_str("%Y-%m-%d %H:%M:%S")
+            .build(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )
+    .unwrap();
+
     let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
-        eprintln!("Erro ao iniciar o listener: {}", e);
+        error!("Erro ao iniciar o listener: {}", e);
         std::process::exit(1);
     });
-    println!("Proxy iniciado na porta {}", get_port());
+    info!("Proxy iniciado na porta {}", get_port());
     start_http(listener);
 }
 
@@ -21,12 +35,12 @@ fn start_http(listener: TcpListener) {
             Ok(mut client_stream) => {
                 thread::spawn(move || {
                     if let Err(e) = handle_client(&mut client_stream) {
-                        eprintln!("Erro ao processar cliente: {}", e);
+                        error!("Erro ao processar cliente: {}", e);
                     }
                 });
             }
             Err(e) => {
-                eprintln!("Erro ao aceitar conexão: {}", e);
+                error!("Erro ao aceitar conexão: {}", e);
             }
         }
     }
@@ -36,10 +50,8 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     let status = get_status();
     client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
-    client_stream
-        .set_read_timeout(Some(Duration::from_secs(30)))?;
-    client_stream
-        .set_write_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
@@ -56,19 +68,13 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     let addr_proxy = determine_proxy(client_stream)?;
 
-    // Tentativa de conexão com backoff exponencial
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
-    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
+    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream);
     let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
 
-    thread::spawn(move || {
-        transfer_data(&mut client_read, &mut server_write);
-    });
-
-    thread::spawn(move || {
-        transfer_data(&mut server_read, &mut client_write);
-    });
+    thread::spawn(move || transfer_data(&mut client_read, &mut server_write));
+    thread::spawn(move || transfer_data(&mut server_read, &mut client_write));
 
     Ok(())
 }
@@ -77,22 +83,35 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
         match read_stream.read(&mut buffer) {
-            Ok(0) => break, // Conexão fechada
+            Ok(0) => {
+                info!(
+                    "Conexão fechada com o cliente {}",
+                    read_stream.peer_addr().unwrap_or_else(|_| "desconhecido".into())
+                );
+                break;
+            }
             Ok(n) => {
                 if n > MAX_BUFFER_SIZE {
-                    eprintln!("Requisição excede o tamanho máximo permitido.");
+                    error!("Requisição excede o tamanho máximo permitido.");
                     break;
                 }
-                // Tentativa de escrita com reconexão em caso de erro
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
-                    eprintln!("Erro de escrita: {}. Tentando novamente...", e);
-                    thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
+                    error!(
+                        "Erro de escrita para o cliente {}: {}. Tentando novamente...",
+                        write_stream.peer_addr().unwrap_or_else(|_| "desconhecido".into()),
+                        e
+                    );
+                    thread::sleep(Duration::from_millis(100));
                     continue;
                 }
             }
             Err(e) => {
-                eprintln!("Erro de leitura: {}. Tentando novamente...", e);
-                thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
+                error!(
+                    "Erro de leitura do cliente {}: {}. Tentando novamente...",
+                    read_stream.peer_addr().unwrap_or_else(|_| "desconhecido".into()),
+                    e
+                );
+                thread::sleep(Duration::from_millis(100));
                 continue;
             }
         }
@@ -109,21 +128,18 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        // Aqui, melhoramos a lógica para decidir qual proxy usar
         if data_str.contains("SSH") {
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
         } else {
-            // Se não detectar o tipo, conecta ao OpenVPN por padrão
-            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            info!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
             get_openvpn_address()
         }
     } else {
-        eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
+        info!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
         get_openvpn_address()
     };
-    
     Ok(addr_proxy)
 }
 
@@ -136,13 +152,19 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
         match TcpStream::connect(addr_proxy) {
             Ok(stream) => return Ok(stream),
             Err(e) if retries < max_retries => {
-                eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
+                error!(
+                    "Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...",
+                    addr_proxy, delay.as_secs()
+                );
                 thread::sleep(delay);
                 retries += 1;
-                delay *= 2;  // Backoff exponencial
+                delay *= 2;
             }
             Err(e) => {
-                eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
+                error!(
+                    "Falha ao conectar ao proxy {} após {} tentativas: {}",
+                    addr_proxy, retries, e
+                );
                 return Err(e);
             }
         }
@@ -150,29 +172,16 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
 }
 
 fn get_port() -> u16 {
-    let args: Vec<String> = env::args().collect();
-    let mut port = 80;
-    for i in 1..args.len() {
-        if args[i] == "--port" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(80);
-            }
-        }
-    }
-    port
+    env::args()
+        .nth(2)
+        .and_then(|port_str| port_str.parse().ok())
+        .unwrap_or(80)
 }
 
 fn get_status() -> String {
-    let args: Vec<String> = env::args().collect();
-    let mut status = String::from("@RustyManager");
-    for i in 1..args.len() {
-        if args[i] == "--status" {
-            if i + 1 < args.len() {
-                status = args[i + 1].clone();
-            }
-        }
-    }
-    status
+    env::args()
+        .nth(3)
+        .unwrap_or_else(|| String::from("@RustyManager"))
 }
 
 fn get_ssh_address() -> String {
