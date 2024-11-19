@@ -44,7 +44,7 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     match peek_stream(client_stream) {
         Ok(data_str) => {
             if data_str.contains("HTTP") {
-                let _ = client_stream.read(&mut vec![0; 1024]);
+                let _ = client_stream.read(&mut vec![0; MAX_BUFFER_SIZE]); // Buffer ajustado
                 let payload_str = data_str.to_lowercase();
                 if payload_str.contains("websocket") || payload_str.contains("ws") {
                     client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
@@ -56,7 +56,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     let addr_proxy = determine_proxy(client_stream)?;
 
-    // Tentativa de conexão com backoff exponencial
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
@@ -83,7 +82,6 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
                     eprintln!("Requisição excede o tamanho máximo permitido.");
                     break;
                 }
-                // Tentativa de escrita com reconexão em caso de erro
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
                     eprintln!("Erro de escrita: {}. Tentando novamente...", e);
                     thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
@@ -100,7 +98,7 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
 }
 
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 1024];
+    let mut peek_buffer = vec![0; MAX_BUFFER_SIZE]; // Buffer ajustado
     let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
@@ -109,13 +107,11 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        // Aqui, melhoramos a lógica para decidir qual proxy usar
         if data_str.contains("SSH") {
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
         } else {
-            // Se não detectar o tipo, conecta ao OpenVPN por padrão
             eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
             get_openvpn_address()
         }
@@ -139,7 +135,7 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
                 eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
                 thread::sleep(delay);
                 retries += 1;
-                delay *= 2;  // Backoff exponencial
+                delay *= 2;
             }
             Err(e) => {
                 eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
