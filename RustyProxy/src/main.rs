@@ -36,39 +36,39 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     let status = get_status();
     client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
-    client_stream
-        .set_read_timeout(Some(Duration::from_secs(30)))?;
-    client_stream
-        .set_write_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    match peek_stream(client_stream) {
-        Ok(data_str) => {
-            if data_str.contains("HTTP") {
-                let _ = client_stream.read(&mut vec![0; 1024]);
-                let payload_str = data_str.to_lowercase();
-                if payload_str.contains("websocket") || payload_str.contains("ws") {
-                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
-                }
+    if let Ok(data_str) = peek_stream(client_stream) {
+        if data_str.contains("HTTP") {
+            let _ = client_stream.read(&mut vec![0; 1024]);
+            let payload_str = data_str.to_lowercase();
+            if payload_str.contains("websocket") || payload_str.contains("ws") {
+                client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
             }
         }
-        Err(e) => return Err(e),
     }
 
     let addr_proxy = determine_proxy(client_stream)?;
-
-    // Tentativa de conexão com backoff exponencial
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
-    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
+    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream);
     let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
 
-    thread::spawn(move || {
+    // Threads para transferir dados em ambas as direções
+    let client_to_server = thread::spawn(move || {
         transfer_data(&mut client_read, &mut server_write);
+        let _ = client_read.shutdown(Shutdown::Both);
     });
 
-    thread::spawn(move || {
+    let server_to_client = thread::spawn(move || {
         transfer_data(&mut server_read, &mut client_write);
+        let _ = server_read.shutdown(Shutdown::Both);
     });
+
+    // Espera as threads terminarem antes de retornar
+    client_to_server.join().ok();
+    server_to_client.join().ok();
 
     Ok(())
 }
@@ -86,13 +86,13 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
                 // Tentativa de escrita com reconexão em caso de erro
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
                     eprintln!("Erro de escrita: {}. Tentando novamente...", e);
-                    thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
+                    thread::sleep(Duration::from_millis(100));
                     continue;
                 }
             }
             Err(e) => {
                 eprintln!("Erro de leitura: {}. Tentando novamente...", e);
-                thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
+                thread::sleep(Duration::from_millis(100));
                 continue;
             }
         }
@@ -109,13 +109,11 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        // Aqui, melhoramos a lógica para decidir qual proxy usar
         if data_str.contains("SSH") {
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
         } else {
-            // Se não detectar o tipo, conecta ao OpenVPN por padrão
             eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
             get_openvpn_address()
         }
@@ -139,7 +137,7 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
                 eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
                 thread::sleep(delay);
                 retries += 1;
-                delay *= 2;  // Backoff exponencial
+                delay *= 2;
             }
             Err(e) => {
                 eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
