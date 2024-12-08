@@ -36,10 +36,8 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     let status = get_status();
     client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
-    client_stream
-        .set_read_timeout(Some(Duration::from_secs(30)))?;
-    client_stream
-        .set_write_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
@@ -56,19 +54,21 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     let addr_proxy = determine_proxy(client_stream)?;
 
-    // Tentativa de conexão com backoff exponencial
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
     let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
 
-    thread::spawn(move || {
+    let client_to_server = thread::spawn(move || {
         transfer_data(&mut client_read, &mut server_write);
     });
 
-    thread::spawn(move || {
+    let server_to_client = thread::spawn(move || {
         transfer_data(&mut server_read, &mut client_write);
     });
+
+    client_to_server.join().ok();
+    server_to_client.join().ok();
 
     Ok(())
 }
@@ -77,26 +77,31 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
         match read_stream.read(&mut buffer) {
-            Ok(0) => break, // Conexão fechada
+            Ok(0) => {
+                // Conexão encerrada pelo cliente
+                eprintln!("Conexão encerrada pelo cliente.");
+                break;
+            }
             Ok(n) => {
                 if n > MAX_BUFFER_SIZE {
                     eprintln!("Requisição excede o tamanho máximo permitido.");
                     break;
                 }
-                // Tentativa de escrita com reconexão em caso de erro
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
-                    eprintln!("Erro de escrita: {}. Tentando novamente...", e);
-                    thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
-                    continue;
+                    eprintln!("Erro de escrita: {}. Encerrando conexão.", e);
+                    break;
                 }
             }
             Err(e) => {
-                eprintln!("Erro de leitura: {}. Tentando novamente...", e);
-                thread::sleep(Duration::from_millis(100)); // Intervalo antes de tentar novamente
-                continue;
+                eprintln!("Erro de leitura: {}. Encerrando conexão.", e);
+                break;
             }
         }
     }
+
+    // Fechar streams ao final
+    read_stream.shutdown(Shutdown::Read).ok();
+    write_stream.shutdown(Shutdown::Write).ok();
 }
 
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
@@ -109,13 +114,11 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        // Aqui, melhoramos a lógica para decidir qual proxy usar
         if data_str.contains("SSH") {
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
         } else {
-            // Se não detectar o tipo, conecta ao OpenVPN por padrão
             eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
             get_openvpn_address()
         }
@@ -123,7 +126,7 @@ fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
         eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
         get_openvpn_address()
     };
-    
+
     Ok(addr_proxy)
 }
 
@@ -139,7 +142,7 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
                 eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
                 thread::sleep(delay);
                 retries += 1;
-                delay *= 2;  // Backoff exponencial
+                delay *= 2;
             }
             Err(e) => {
                 eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
