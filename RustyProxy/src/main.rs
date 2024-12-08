@@ -41,12 +41,11 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
-            if data_str.contains("HTTP") {
-                let _ = client_stream.read(&mut vec![0; 1024]);
-                let payload_str = data_str.to_lowercase();
-                if payload_str.contains("websocket") || payload_str.contains("ws") {
-                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
-                }
+            if is_websocket(&data_str) {
+                client_stream.write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                )?;
+                return Ok(());
             }
         }
         Err(e) => return Err(e),
@@ -78,7 +77,6 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     loop {
         match read_stream.read(&mut buffer) {
             Ok(0) => {
-                // Conexão encerrada pelo cliente
                 eprintln!("Conexão encerrada pelo cliente.");
                 break;
             }
@@ -99,13 +97,12 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
         }
     }
 
-    // Fechar streams ao final
     read_stream.shutdown(Shutdown::Read).ok();
     write_stream.shutdown(Shutdown::Write).ok();
 }
 
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 1024];
+    let mut peek_buffer = vec![0; 4048];
     let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
@@ -114,12 +111,17 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        if data_str.contains("SSH") {
+        if is_websocket(&data_str) {
+            eprintln!("Conexão detectada como WebSocket.");
+            get_http_proxy_address()
+        } else if is_ssh(&data_str) {
+            eprintln!("Conexão detectada como SSH.");
             get_ssh_address()
-        } else if data_str.contains("OpenVPN") {
+        } else if is_openvpn(&data_str) {
+            eprintln!("Conexão detectada como OpenVPN.");
             get_openvpn_address()
         } else {
-            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            eprintln!("Tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
             get_openvpn_address()
         }
     } else {
@@ -128,6 +130,18 @@ fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     };
 
     Ok(addr_proxy)
+}
+
+fn is_websocket(data: &str) -> bool {
+    data.contains("Upgrade: websocket") && data.contains("Connection: Upgrade")
+}
+
+fn is_ssh(data: &str) -> bool {
+    data.starts_with("SSH-")
+}
+
+fn is_openvpn(data: &str) -> bool {
+    data.contains("OpenVPN") || data.contains("\x38\x10\x02\x00")
 }
 
 fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
@@ -139,13 +153,20 @@ fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error>
         match TcpStream::connect(addr_proxy) {
             Ok(stream) => return Ok(stream),
             Err(e) if retries < max_retries => {
-                eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
+                eprintln!(
+                    "Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...",
+                    addr_proxy,
+                    delay.as_secs()
+                );
                 thread::sleep(delay);
                 retries += 1;
                 delay *= 2;
             }
             Err(e) => {
-                eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
+                eprintln!(
+                    "Falha ao conectar ao proxy {} após {} tentativas: {}",
+                    addr_proxy, retries, e
+                );
                 return Err(e);
             }
         }
@@ -184,4 +205,8 @@ fn get_ssh_address() -> String {
 
 fn get_openvpn_address() -> String {
     env::var("OPENVPN_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:1194"))
+}
+
+fn get_http_proxy_address() -> String {
+    env::var("HTTP_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:8080"))
 }
