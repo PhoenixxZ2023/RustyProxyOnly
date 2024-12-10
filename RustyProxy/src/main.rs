@@ -127,7 +127,7 @@ fn safe_shutdown(stream: &TcpStream) {
 }
 
 fn peek_stream_with_buffer(read_stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<String, Error> {
-    let mut temp_buffer = vec![0; 1024];
+    let mut temp_buffer = vec![0; 4048];
     let bytes_read = read_stream.read(&mut temp_buffer)?;
     buffer.extend_from_slice(&temp_buffer[..bytes_read]);
 
