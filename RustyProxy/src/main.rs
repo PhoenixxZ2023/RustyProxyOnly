@@ -227,7 +227,7 @@ fn get_status() -> String {
 }
 
 fn get_ssh_address() -> String {
-    env::var("SSH_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:80"))
+    env::var("SSH_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:22"))
 }
 
 fn get_openvpn_address() -> String {
