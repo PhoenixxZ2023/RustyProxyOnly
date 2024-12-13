@@ -2,17 +2,58 @@ use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
-use std::{env, thread};
+use std::{env, fs, process::Command, thread};
+
+use native_tls::{Identity, TlsAcceptor, TlsStream};
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
 fn main() {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
-        eprintln!("Erro ao iniciar o listener: {}", e);
-        std::process::exit(1);
-    });
-    println!("Proxy iniciado na porta {}", get_port());
-    start_http(listener);
+    let port = get_port();
+    if port == 443 {
+        let tls_acceptor = load_or_generate_tls().expect("Erro ao carregar ou gerar certificados TLS");
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|e| {
+            eprintln!("Erro ao iniciar o listener: {}", e);
+            std::process::exit(1);
+        });
+        println!("Proxy TLS iniciado na porta {}", port);
+        start_tls(listener, tls_acceptor);
+    } else {
+        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|e| {
+            eprintln!("Erro ao iniciar o listener: {}", e);
+            std::process::exit(1);
+        });
+        println!("Proxy iniciado na porta {}", port);
+        start_http(listener);
+    }
+}
+
+fn start_tls(listener: TcpListener, tls_acceptor: TlsAcceptor) {
+    for stream in listener.incoming() {
+        match stream {
+            Ok(client_stream) => {
+                let tls_acceptor = tls_acceptor.clone();
+                thread::spawn(move || {
+                    match tls_acceptor.accept(client_stream) {
+                        Ok(mut tls_stream) => {
+                            if let Err(e) = handle_tls_client(&mut tls_stream) {
+                                eprintln!("Erro ao processar cliente TLS: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("Erro na handshake TLS: {}", e),
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("Erro ao aceitar conexão: {}", e);
+            }
+        }
+    }
+}
+
+fn handle_tls_client(client_stream: &mut TlsStream<TcpStream>) -> Result<(), Error> {
+    let mut client_tcp_stream = client_stream.get_mut();
+    handle_client(&mut client_tcp_stream)
 }
 
 fn start_http(listener: TcpListener) {
