@@ -34,29 +34,16 @@ fn start_http(listener: TcpListener) {
 
 fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     let status = get_status();
-    let response = format!(
-        "HTTP/1.1 101 {}\r\n\
-        Date: {}\r\n\
-        Content-Length: 0\r\n\
-        Server: RustyProxy\r\n\r\n",
-        status,
-        httpdate::HttpDate::from(std::time::SystemTime::now())
-    );
-
-    client_stream.write_all(response.as_bytes())?;
+    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
     client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    let mut buffer: Vec<u8> = Vec::new();
-    match peek_stream_with_buffer(client_stream, &mut buffer) {
+    match peek_stream(client_stream) {
         Ok(data_str) => {
             if is_websocket(&data_str) {
                 client_stream.write_all(
-                    b"HTTP/1.1 101 Switching Protocols\r\n\
-                    Upgrade: websocket\r\n\
-                    Connection: Upgrade\r\n\
-                    Date: \r\n\r\n",
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
                 )?;
                 return Ok(());
             }
@@ -110,34 +97,20 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
         }
     }
 
-    safe_shutdown(read_stream);
-    safe_shutdown(write_stream);
+    read_stream.shutdown(Shutdown::Read).ok();
+    write_stream.shutdown(Shutdown::Write).ok();
 }
 
-fn safe_shutdown(stream: &TcpStream) {
-    match stream.take_error() {
-        Ok(None) => {
-            if let Err(e) = stream.shutdown(Shutdown::Both) {
-                eprintln!("Erro ao encerrar conexão: {}", e);
-            }
-        }
-        Ok(Some(e)) => eprintln!("Erro no socket antes de encerrar: {}", e),
-        Err(e) => eprintln!("Erro ao verificar o socket: {}", e),
-    }
-}
-
-fn peek_stream_with_buffer(read_stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<String, Error> {
-    let mut temp_buffer = vec![0; 4048];
-    let bytes_read = read_stream.read(&mut temp_buffer)?;
-    buffer.extend_from_slice(&temp_buffer[..bytes_read]);
-
-    let data_str = String::from_utf8_lossy(buffer).to_string();
-    Ok(data_str)
+fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 4048];
+    let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
+    let data = &peek_buffer[..bytes_peeked];
+    let data_str = String::from_utf8_lossy(data);
+    Ok(data_str.to_string())
 }
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
-    let mut buffer: Vec<u8> = Vec::new();
-    let addr_proxy = if let Ok(data_str) = peek_stream_with_buffer(client_stream, &mut buffer) {
+    let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
         if is_websocket(&data_str) {
             eprintln!("Conexão detectada como WebSocket.");
             get_http_proxy_address()
