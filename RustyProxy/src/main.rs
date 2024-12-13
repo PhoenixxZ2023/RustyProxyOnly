@@ -43,8 +43,7 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
         Ok(data_str) => {
             if data_str.contains("HTTP") {
                 let _ = client_stream.read(&mut vec![0; 1024]);
-                let payload_str = data_str.to_lowercase();
-                if payload_str.contains("websocket") || payload_str.contains("ws") {
+                if is_websocket_request(&data_str) {
                     client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
                 }
             }
@@ -112,9 +111,16 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
     Ok(data_str.to_string())
 }
 
+fn is_websocket_request(data_str: &str) -> bool {
+    data_str.to_lowercase().contains("upgrade: websocket")
+}
+
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
-        if data_str.contains("SSH") {
+        if is_websocket_request(&data_str) {
+            eprintln!("Tráfego WebSocket detectado. Conectando ao proxy WebSocket.");
+            get_websocket_address()
+        } else if data_str.contains("SSH") {
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
@@ -184,4 +190,8 @@ fn get_ssh_address() -> String {
 
 fn get_openvpn_address() -> String {
     env::var("OPENVPN_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:1194"))
+}
+
+fn get_websocket_address() -> String {
+    env::var("WEBSOCKET_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:8080"))
 }
