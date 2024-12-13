@@ -102,7 +102,7 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
 }
 
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 4048];
+    let mut peek_buffer = vec![0; 2048];
     let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
