@@ -1,8 +1,10 @@
+use native_tls::{Identity, TlsAcceptor, TlsStream};
 use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
 use std::time::Duration;
-use std::{env, thread};
+use std::{env, fs};
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
@@ -12,16 +14,59 @@ fn main() {
         std::process::exit(1);
     });
     println!("Proxy iniciado na porta {}", get_port());
-    start_http(listener);
+
+    // Configuração do TLS
+    let tls_acceptor = setup_tls().unwrap_or_else(|e| {
+        eprintln!("Erro ao configurar TLS: {}", e);
+        std::process::exit(1);
+    });
+    let tls_acceptor = Arc::new(tls_acceptor);
+
+    // Finalização controlada
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let listener = Arc::new(Mutex::new(listener));
+
+    let handle = thread::spawn({
+        let listener = Arc::clone(&listener);
+        let tls_acceptor = Arc::clone(&tls_acceptor);
+        move || start_http(listener, tls_acceptor, shutdown_rx)
+    });
+
+    ctrlc::set_handler(move || {
+        println!("\nFinalizando servidor...");
+        shutdown_tx.send(()).ok();
+    })
+    .expect("Erro ao configurar o sinal de encerramento");
+
+    handle.join().ok();
 }
 
-fn start_http(listener: TcpListener) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut client_stream) => {
+fn setup_tls() -> Result<TlsAcceptor, Error> {
+    let identity = fs::read("identity.pfx").expect("Arquivo PFX não encontrado");
+    let identity = Identity::from_pkcs12(&identity, "password").expect("Erro ao carregar o certificado");
+    Ok(TlsAcceptor::new(identity).expect("Erro ao criar o acceptor TLS"))
+}
+
+fn start_http(listener: Arc<Mutex<TcpListener>>, tls_acceptor: Arc<TlsAcceptor>, shutdown_rx: mpsc::Receiver<()>) {
+    let listener = listener.lock().unwrap();
+    loop {
+        if let Ok(_) = shutdown_rx.try_recv() {
+            println!("Servidor encerrado.");
+            break;
+        }
+
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let tls_acceptor = Arc::clone(&tls_acceptor);
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(&mut client_stream) {
-                        eprintln!("Erro ao processar cliente: {}", e);
+                    let stream = tls_acceptor.accept(stream);
+                    match stream {
+                        Ok(mut tls_stream) => {
+                            if let Err(e) = handle_client(&mut tls_stream) {
+                                eprintln!("Erro ao processar cliente: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("Erro ao estabelecer conexão TLS: {}", e),
                     }
                 });
             }
@@ -32,7 +77,7 @@ fn start_http(listener: TcpListener) {
     }
 }
 
-fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
+fn handle_client(client_stream: &mut TlsStream<TcpStream>) -> Result<(), Error> {
     let status = get_status();
     client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
@@ -46,6 +91,8 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
                 if is_websocket_request(&data_str) {
                     client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
                 }
+            } else {
+                eprintln!("Tráfego desconhecido: {}", data_str);
             }
         }
         Err(e) => return Err(e),
@@ -72,20 +119,15 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
-fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
+fn transfer_data(read_stream: &mut TlsStream<TcpStream>, write_stream: &mut TlsStream<TcpStream>) {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
         match read_stream.read(&mut buffer) {
             Ok(0) => {
-                // Conexão encerrada pelo cliente
                 eprintln!("Conexão encerrada pelo cliente.");
                 break;
             }
             Ok(n) => {
-                if n > MAX_BUFFER_SIZE {
-                    eprintln!("Requisição excede o tamanho máximo permitido.");
-                    break;
-                }
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
                     eprintln!("Erro de escrita: {}. Encerrando conexão.", e);
                     break;
@@ -98,14 +140,13 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
         }
     }
 
-    // Fechar streams ao final
-    read_stream.shutdown(Shutdown::Read).ok();
-    write_stream.shutdown(Shutdown::Write).ok();
+    read_stream.get_ref().shutdown(Shutdown::Read).ok();
+    write_stream.get_ref().shutdown(Shutdown::Write).ok();
 }
 
-fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
+fn peek_stream(read_stream: &TlsStream<TcpStream>) -> Result<String, Error> {
     let mut peek_buffer = vec![0; 1024];
-    let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
+    let bytes_peeked = read_stream.get_ref().peek(&mut peek_buffer)?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
     Ok(data_str.to_string())
@@ -115,7 +156,7 @@ fn is_websocket_request(data_str: &str) -> bool {
     data_str.to_lowercase().contains("upgrade: websocket")
 }
 
-fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
+fn determine_proxy(client_stream: &mut TlsStream<TcpStream>) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
         if is_websocket_request(&data_str) {
             eprintln!("Tráfego WebSocket detectado. Conectando ao proxy WebSocket.");
@@ -125,7 +166,7 @@ fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
         } else if data_str.contains("OpenVPN") {
             get_openvpn_address()
         } else {
-            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            eprintln!("Tipo de tráfego desconhecido: {}", data_str);
             get_openvpn_address()
         }
     } else {
