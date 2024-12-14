@@ -3,8 +3,6 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
-use sha1::{Digest, Sha1};
-use base64::{engine::general_purpose, Engine as _};
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
@@ -35,14 +33,18 @@ fn start_http(listener: TcpListener) {
 }
 
 fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
+    let status = get_status();
+    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
+
     client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
             if is_websocket(&data_str) {
-                perform_websocket_handshake(client_stream, &data_str)?;
-                maintain_websocket_flow(client_stream)?;
+                client_stream.write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                )?;
                 return Ok(());
             }
         }
@@ -50,6 +52,7 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     }
 
     let addr_proxy = determine_proxy(client_stream)?;
+
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
@@ -67,64 +70,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     server_to_client.join().ok();
 
     Ok(())
-}
-
-fn perform_websocket_handshake(client_stream: &mut TcpStream, data: &str) -> Result<(), Error> {
-    if let Some(key) = extract_websocket_key(data) {
-        let accept_key = generate_accept_key(&key);
-        let handshake_response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-            accept_key
-        );
-        client_stream.write_all(handshake_response.as_bytes())?;
-        eprintln!("Handshake WebSocket concluído com sucesso.");
-    } else {
-        eprintln!("Chave WebSocket não encontrada, encerrando conexão.");
-        client_stream.shutdown(Shutdown::Both)?;
-    }
-    Ok(())
-}
-
-fn maintain_websocket_flow(client_stream: &mut TcpStream) -> Result<(), Error> {
-    let mut buffer = [0; MAX_BUFFER_SIZE];
-    loop {
-        match client_stream.read(&mut buffer) {
-            Ok(0) => {
-                eprintln!("Conexão WebSocket encerrada pelo cliente.");
-                break;
-            }
-            Ok(n) => {
-                eprintln!("Dados recebidos no WebSocket: {} bytes", n);
-                client_stream.write_all(&buffer[..n])?;
-            }
-            Err(e) => {
-                eprintln!("Erro na comunicação WebSocket: {}", e);
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn extract_websocket_key(data: &str) -> Option<String> {
-    for line in data.lines() {
-        if line.to_lowercase().starts_with("sec-websocket-key:") {
-            return Some(line[18..].trim().to_string());
-        }
-    }
-    None
-}
-
-fn generate_accept_key(key: &str) -> String {
-    let magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    let mut hasher = Sha1::new();
-    hasher.update(format!("{}{}", key, magic_string));
-    let hashed = hasher.finalize();
-    general_purpose::STANDARD.encode(hashed)
-}
-
-fn is_websocket(data: &str) -> bool {
-    data.contains("Upgrade: websocket") && data.contains("Connection: Upgrade")
 }
 
 fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
@@ -187,6 +132,10 @@ fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     Ok(addr_proxy)
 }
 
+fn is_websocket(data: &str) -> bool {
+    data.contains("Upgrade: websocket") && data.contains("Connection: Upgrade")
+}
+
 fn is_ssh(data: &str) -> bool {
     data.starts_with("SSH-")
 }
@@ -235,6 +184,19 @@ fn get_port() -> u16 {
         }
     }
     port
+}
+
+fn get_status() -> String {
+    let args: Vec<String> = env::args().collect();
+    let mut status = String::from("@RustyManager");
+    for i in 1..args.len() {
+        if args[i] == "--status" {
+            if i + 1 < args.len() {
+                status = args[i + 1].clone();
+            }
+        }
+    }
+    status
 }
 
 fn get_ssh_address() -> String {
