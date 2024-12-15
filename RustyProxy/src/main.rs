@@ -1,22 +1,26 @@
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{sleep, Duration};
+use async_std::io;
+use async_std::net::{TcpListener, TcpStream};
+use async_std::task;
+use async_std::prelude::*;
 use std::env;
+use std::time::Duration;
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
-#[tokio::main]
+#[async_std::main]
 async fn main() {
     let port = get_port();
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await.unwrap_or_else(|e| {
-        eprintln!("Erro ao iniciar o listener: {}", e);
-        std::process::exit(1);
-    });
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Erro ao iniciar o listener: {}", e);
+            std::process::exit(1);
+        });
 
     println!("Proxy iniciado na porta {}", port);
 
     while let Ok((mut client_stream, _)) = listener.accept().await {
-        tokio::spawn(async move {
+        task::spawn(async move {
             if let Err(e) = handle_client(&mut client_stream).await {
                 eprintln!("Erro ao processar cliente: {}", e);
             }
@@ -27,7 +31,9 @@ async fn main() {
 async fn handle_client(client_stream: &mut TcpStream) -> io::Result<()> {
     let status = get_status();
 
-    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).await?;
+    client_stream
+        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
     match peek_stream(client_stream).await {
         Ok(data_str) => {
@@ -35,7 +41,9 @@ async fn handle_client(client_stream: &mut TcpStream) -> io::Result<()> {
                 let _ = client_stream.read(&mut vec![0; 1024]).await;
                 let payload_str = data_str.to_lowercase();
                 if payload_str.contains("websocket") || payload_str.contains("ws") {
-                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes()).await?;
+                    client_stream
+                        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+                        .await?;
                 }
             }
         }
@@ -47,25 +55,26 @@ async fn handle_client(client_stream: &mut TcpStream) -> io::Result<()> {
     let server_stream = attempt_connection_with_backoff(&addr_proxy).await?;
 
     let (mut client_read, mut client_write) = client_stream.split();
-    let (mut server_read, mut server_write) = server_stream.into_split();
+    let (mut server_read, mut server_write) = server_stream.split();
 
-    let client_to_server = tokio::spawn(async move {
+    let client_to_server = task::spawn(async move {
         transfer_data(&mut client_read, &mut server_write).await;
     });
 
-    let server_to_client = tokio::spawn(async move {
+    let server_to_client = task::spawn(async move {
         transfer_data(&mut server_read, &mut client_write).await;
     });
 
-    tokio::try_join!(client_to_server, server_to_client).ok();
+    client_to_server.await;
+    server_to_client.await;
 
     Ok(())
 }
 
 async fn transfer_data<R, W>(read_stream: &mut R, write_stream: &mut W)
 where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
+    R: async_std::io::Read + Unpin,
+    W: async_std::io::Write + Unpin,
 {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
@@ -94,7 +103,7 @@ where
 
 async fn peek_stream(stream: &TcpStream) -> io::Result<String> {
     let mut peek_buffer = vec![0; 1024];
-    let bytes_peeked = stream.peek(&mut peek_buffer)?;
+    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
     Ok(data_str.to_string())
@@ -130,7 +139,7 @@ async fn attempt_connection_with_backoff(addr_proxy: &str) -> io::Result<TcpStre
                     addr_proxy,
                     delay.as_secs()
                 );
-                sleep(delay).await;
+                task::sleep(delay).await;
                 retries += 1;
                 delay *= 2;
             }
