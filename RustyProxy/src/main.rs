@@ -5,7 +5,6 @@ use std::time::Duration;
 use std::{env, thread};
 
 const MAX_BUFFER_SIZE: usize = 8192;
-const PEEK_BUFFER_SIZE: usize = 1024;
 
 fn main() {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
@@ -71,11 +70,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     client_to_server.join().ok();
     server_to_client.join().ok();
 
-    client_read.shutdown(Shutdown::Both).ok();
-    client_write.shutdown(Shutdown::Both).ok();
-    server_read.shutdown(Shutdown::Both).ok();
-    server_write.shutdown(Shutdown::Both).ok();
-
     Ok(())
 }
 
@@ -84,6 +78,7 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     loop {
         match read_stream.read(&mut buffer) {
             Ok(0) => {
+                // Conexão encerrada pelo cliente
                 eprintln!("Conexão encerrada pelo cliente.");
                 break;
             }
@@ -96,7 +91,6 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
                     eprintln!("Erro de escrita: {}. Encerrando conexão.", e);
                     break;
                 }
-                eprintln!("Transferidos {} bytes.", n); // Log detalhado
             }
             Err(e) => {
                 eprintln!("Erro de leitura: {}. Encerrando conexão.", e);
@@ -104,10 +98,14 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
             }
         }
     }
+
+    // Fechar streams ao final
+    read_stream.shutdown(Shutdown::Read).ok();
+    write_stream.shutdown(Shutdown::Write).ok();
 }
 
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; PEEK_BUFFER_SIZE];
+    let mut peek_buffer = vec![0; 1024];
     let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
@@ -117,10 +115,8 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
         if data_str.contains("SSH") {
-            eprintln!("Tráfego identificado como SSH. Redirecionando para o proxy SSH.");
             get_ssh_address()
         } else if data_str.contains("OpenVPN") {
-            eprintln!("Tráfego identificado como OpenVPN. Redirecionando para o proxy OpenVPN.");
             get_openvpn_address()
         } else {
             eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
@@ -171,7 +167,7 @@ fn get_port() -> u16 {
 
 fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
-    let mut status = String::from("@RustyManager - Conexão estabelecida");
+    let mut status = String::from("@RustyManager");
     for i in 1..args.len() {
         if args[i] == "--status" {
             if i + 1 < args.len() {
