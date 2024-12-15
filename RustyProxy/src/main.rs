@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{env, thread};
 
 const MAX_BUFFER_SIZE: usize = 8192;
-const PEEK_BUFFER_SIZE: usize = 512;
+const PEEK_BUFFER_SIZE: usize = 1024;
 
 fn main() {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
