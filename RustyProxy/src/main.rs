@@ -1,3 +1,5 @@
+use sha1::{Digest, Sha1};
+use base64::encode;
 use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -41,7 +43,9 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
-            if data_str.contains("HTTP") {
+            if data_str.contains("Upgrade: websocket") {
+                handle_websocket_handshake(client_stream, &data_str)?;
+            } else if data_str.contains("HTTP") {
                 let _ = client_stream.read(&mut vec![0; 1024]);
                 let payload_str = data_str.to_lowercase();
                 if payload_str.contains("websocket") || payload_str.contains("ws") {
@@ -53,7 +57,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     }
 
     let addr_proxy = determine_proxy(client_stream)?;
-
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
@@ -70,6 +73,30 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     client_to_server.join().ok();
     server_to_client.join().ok();
 
+    Ok(())
+}
+
+fn handle_websocket_handshake(client_stream: &mut TcpStream, request: &str) -> Result<(), Error> {
+    if let Some(key_line) = request.lines().find(|line| line.starts_with("Sec-WebSocket-Key: ")) {
+        let key = key_line.split(": ").nth(1).unwrap().trim();
+        let mut sha1 = Sha1::new();
+        sha1.update(key.as_bytes());
+        sha1.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        let accept_key = encode(sha1.finalize());
+
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\n\r\n",
+            accept_key
+        );
+
+        client_stream.write_all(response.as_bytes())?;
+        println!("Handshake WebSocket concluído com sucesso.");
+    } else {
+        return Err(Error::new(std::io::ErrorKind::InvalidData, "Chave WebSocket não encontrada"));
+    }
     Ok(())
 }
 
