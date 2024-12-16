@@ -34,16 +34,22 @@ fn start_http(listener: TcpListener) {
 
 fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     let status = get_status();
+    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
 
     client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    let data_str = peek_stream(client_stream)?;
-
-    if data_str.contains("Upgrade: websocket") {
-        perform_websocket_handshake(client_stream, &data_str)?;
-    } else if data_str.contains("HTTP") {
-        client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
+    match peek_stream(client_stream) {
+        Ok(data_str) => {
+            if data_str.contains("HTTP") {
+                let _ = client_stream.read(&mut vec![0; 1024]);
+                let payload_str = data_str.to_lowercase();
+                if payload_str.contains("websocket") || payload_str.contains("ws") {
+                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
+                }
+            }
+        }
+        Err(e) => return Err(e),
     }
 
     let addr_proxy = determine_proxy(client_stream)?;
@@ -65,47 +71,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     server_to_client.join().ok();
 
     Ok(())
-}
-
-fn perform_websocket_handshake(client_stream: &mut TcpStream, request: &str) -> Result<(), Error> {
-    // Extrair chave Sec-WebSocket-Key do cabeçalho HTTP
-    let key = extract_websocket_key(request).ok_or_else(|| {
-        Error::new(std::io::ErrorKind::InvalidData, "Chave WebSocket inválida")
-    })?;
-
-    // Gerar chave de resposta WebSocket
-    let accept_key = generate_websocket_accept_key(&key);
-
-    // Enviar resposta de handshake
-    let response = format!(
-        "HTTP/1.1 101 Switching Protocols\r\n\
-        Upgrade: websocket\r\n\
-        Connection: Upgrade\r\n\
-        Sec-WebSocket-Accept: {}\r\n\r\n",
-        accept_key
-    );
-
-    client_stream.write_all(response.as_bytes())?;
-    Ok(())
-}
-
-fn extract_websocket_key(request: &str) -> Option<String> {
-    for line in request.lines() {
-        if line.starts_with("Sec-WebSocket-Key:") {
-            return line.split(":").nth(1).map(|s| s.trim().to_string());
-        }
-    }
-    None
-}
-
-fn generate_websocket_accept_key(key: &str) -> String {
-    use sha1::{Digest, Sha1};
-    use base64::encode;
-
-    let concatenated = format!("{}{}", key, "258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-    let mut hasher = Sha1::new();
-    hasher.update(concatenated.as_bytes());
-    encode(hasher.finalize())
 }
 
 fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
