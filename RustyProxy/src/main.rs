@@ -114,30 +114,53 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
     if let Ok(data_str) = peek_stream(client_stream) {
-        // Verificar se o tráfego corresponde a padrões específicos
-        if is_ssh_traffic(&data_str) {
-            return Ok(get_ssh_address());
-        } else if is_openvpn_traffic(&data_str) {
-            return Ok(get_openvpn_address());
-        } else {
-            eprintln!("Tráfego não identificado. Conectando ao proxy OpenVPN por padrão.");
+        let data = data_str.as_bytes();
+        match identify_traffic(data) {
+            "SSH" => Ok(get_ssh_address()),
+            "OpenVPN" => Ok(get_openvpn_address()),
+            "HTTP" => {
+                eprintln!("Tráfego HTTP identificado, redirecionamento personalizado pode ser necessário.");
+                Ok(get_openvpn_address()) // Pode ajustar para outro proxy se necessário
+            }
+            _ => {
+                eprintln!("Tráfego não identificado. Conectando ao proxy OpenVPN por padrão.");
+                Ok(get_openvpn_address())
+            }
         }
     } else {
         eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
+        Ok(get_openvpn_address())
     }
-
-    Ok(get_openvpn_address())
 }
 
-fn is_ssh_traffic(data: &str) -> bool {
-    // Verifica se os primeiros bytes indicam tráfego SSH (por exemplo, "SSH-2.0")
-    data.starts_with("SSH-")
+fn identify_traffic(data: &[u8]) -> &'static str {
+    if is_ssh_traffic(data) {
+        "SSH"
+    } else if is_openvpn_traffic(data) {
+        "OpenVPN"
+    } else if is_http_traffic(data) {
+        "HTTP"
+    } else {
+        "UNKNOWN"
+    }
 }
 
-fn is_openvpn_traffic(data: &str) -> bool {
-    // Verifica se o tráfego contém padrões comuns do OpenVPN
-    // Exemplo: OpenVPN usa protocolos UDP/TLS com cabeçalhos conhecidos
-    data.contains("OpenVPN") || data.contains("P_CONTROL_HARD_RESET_CLIENT_V2")
+fn is_ssh_traffic(data: &[u8]) -> bool {
+    // Verifica assinatura SSH: começa com "SSH-" (ASCII: 0x53 0x53 0x48 0x2D)
+    data.starts_with(b"SSH-")
+}
+
+fn is_openvpn_traffic(data: &[u8]) -> bool {
+    // Verifica padrões OpenVPN, como "P_CONTROL_HARD_RESET_CLIENT_V2"
+    // ou características de pacotes TLS usados no OpenVPN
+    let tls_signature = b"\x16\x03"; // ClientHello ou ServerHello do TLS
+    data.starts_with(tls_signature) || data.contains(b"P_CONTROL_HARD_RESET_CLIENT_V2")
+}
+
+fn is_http_traffic(data: &[u8]) -> bool {
+    // Verifica se os primeiros bytes representam um cabeçalho HTTP (GET, POST, etc.)
+    let http_methods = [b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"CONNECT "];
+    http_methods.iter().any(|method| data.starts_with(method))
 }
 
 fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
