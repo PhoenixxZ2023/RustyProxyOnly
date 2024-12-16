@@ -1,5 +1,3 @@
-use sha1::{Digest, Sha1};
-use base64::encode;
 use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -43,9 +41,7 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
 
     match peek_stream(client_stream) {
         Ok(data_str) => {
-            if data_str.contains("Upgrade: websocket") {
-                handle_websocket_handshake(client_stream, &data_str)?;
-            } else if data_str.contains("HTTP") {
+            if data_str.contains("HTTP") {
                 let _ = client_stream.read(&mut vec![0; 1024]);
                 let payload_str = data_str.to_lowercase();
                 if payload_str.contains("websocket") || payload_str.contains("ws") {
@@ -57,6 +53,7 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     }
 
     let addr_proxy = determine_proxy(client_stream)?;
+
     let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
@@ -73,30 +70,6 @@ fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
     client_to_server.join().ok();
     server_to_client.join().ok();
 
-    Ok(())
-}
-
-fn handle_websocket_handshake(client_stream: &mut TcpStream, request: &str) -> Result<(), Error> {
-    if let Some(key_line) = request.lines().find(|line| line.starts_with("Sec-WebSocket-Key: ")) {
-        let key = key_line.split(": ").nth(1).unwrap().trim();
-        let mut sha1 = Sha1::new();
-        sha1.update(key.as_bytes());
-        sha1.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
-        let accept_key = encode(sha1.finalize());
-
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {}\r\n\r\n",
-            accept_key
-        );
-
-        client_stream.write_all(response.as_bytes())?;
-        println!("Handshake WebSocket concluído com sucesso.");
-    } else {
-        return Err(Error::new(std::io::ErrorKind::InvalidData, "Chave WebSocket não encontrada"));
-    }
     Ok(())
 }
 
@@ -140,31 +113,21 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 }
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
-    if let Ok(data_str) = peek_stream(client_stream) {
-        // Verificar se o tráfego corresponde a padrões específicos
-        if is_ssh_traffic(&data_str) {
-            return Ok(get_ssh_address());
-        } else if is_openvpn_traffic(&data_str) {
-            return Ok(get_openvpn_address());
+    let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
+        if data_str.contains("SSH") {
+            get_ssh_address()
+        } else if data_str.contains("OpenVPN") {
+            get_openvpn_address()
         } else {
-            eprintln!("Tráfego não identificado. Conectando ao proxy OpenVPN por padrão.");
+            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            get_openvpn_address()
         }
     } else {
         eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
-    }
+        get_openvpn_address()
+    };
 
-    Ok(get_openvpn_address())
-}
-
-fn is_ssh_traffic(data: &str) -> bool {
-    // Verifica se os primeiros bytes indicam tráfego SSH (por exemplo, "SSH-2.0")
-    data.starts_with("SSH-")
-}
-
-fn is_openvpn_traffic(data: &str) -> bool {
-    // Verifica se o tráfego contém padrões comuns do OpenVPN
-    // Exemplo: OpenVPN usa protocolos UDP/TLS com cabeçalhos conhecidos
-    data.contains("OpenVPN") || data.contains("P_CONTROL_HARD_RESET_CLIENT_V2")
+    Ok(addr_proxy)
 }
 
 fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
