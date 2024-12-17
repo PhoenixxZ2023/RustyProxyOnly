@@ -1,113 +1,71 @@
-use std::env;
-use std::error::Error;
-use std::fs::File;
-use std::io::{self, BufReader, Read, Write, ErrorKind};
+use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread;
+use std::sync::mpsc;
 use std::time::Duration;
-
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls_pemfile::{certs, private_key};
-use tokio::net::{TcpListener as TokioListener, TcpStream as TokioStream};
-use tokio_rustls::{rustls, TlsAcceptor, server::TlsStream};
+use std::{env, thread};
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
-// ------------------------------- MAIN ----------------------------------
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let mode = get_mode();
-    let port = get_port();
-
-    match mode.as_str() {
-        "tls" => {
-            println!("Iniciando Proxy TLS na porta {}", port);
-            start_tls_proxy(port).await?;
-        }
-        "tcp" => {
-            println!("Iniciando Proxy TCP/HTTP na porta {}", port);
-            start_tcp_proxy(port)?;
-        }
-        _ => {
-            eprintln!("Modo desconhecido! Use --mode tls ou --mode tcp");
-        }
-    }
-
-    Ok(())
+fn main() {
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
+        eprintln!("Erro ao iniciar o listener: {}", e);
+        std::process::exit(1);
+    });
+    println!("Proxy iniciado na porta {}", get_port());
+    start_http(listener);
 }
 
-// --------------------------- TLS PROXY ---------------------------------
-
-async fn start_tls_proxy(port: u16) -> Result<(), Box<dyn Error>> {
-    let addr = format!("[::]:{}", port);
-
-    let cert = load_certs(PathBuf::from(get_cert()).as_path())?;
-    let key = load_key(PathBuf::from(get_key()).as_path())?;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert, key)
-        .map_err(|err| io::Error::new(ErrorKind::InvalidInput, err))?;
-
-    let acceptor = TlsAcceptor::from(Arc::new(config));
-    let listener = TokioListener::bind(&addr).await?;
-
-    loop {
-        let (client_socket, _) = listener.accept().await?;
-        let acceptor_clone = acceptor.clone();
-
-        tokio::spawn(async move {
-            if let Ok(mut tls_stream) = acceptor_clone.accept(client_socket).await {
-                let _ = connect_target("127.0.0.1:80", &mut tls_stream).await;
-            }
-        });
-    }
-}
-
-async fn connect_target(host: &str, client_socket: &mut TlsStream<TokioStream>) -> Result<(), Box<dyn Error>> {
-    let mut target_socket = TokioStream::connect(host).await?;
-    do_forwarding(client_socket, &mut target_socket).await?;
-    Ok(())
-}
-
-async fn do_forwarding(client_socket: &mut TlsStream<TokioStream>, target_socket: &mut TokioStream) -> Result<(), Box<dyn Error>> {
-    let (mut client_reader, mut client_writer) = tokio::io::split(client_socket);
-    let (mut target_reader, mut target_writer) = tokio::io::split(target_socket);
-
-    tokio::select! {
-        _ = tokio::io::copy(&mut client_reader, &mut target_writer) => {}
-        _ = tokio::io::copy(&mut target_reader, &mut client_writer) => {}
-    }
-
-    Ok(())
-}
-
-// ------------------------- TCP/HTTP PROXY ------------------------------
-
-fn start_tcp_proxy(port: u16) -> Result<(), Error> {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
+fn start_http(listener: TcpListener) {
     for stream in listener.incoming() {
-        if let Ok(mut client_stream) = stream {
-            thread::spawn(move || {
-                let _ = handle_client(&mut client_stream);
-            });
+        match stream {
+            Ok(mut client_stream) => {
+                thread::spawn(move || {
+                    if let Err(e) = handle_client(&mut client_stream) {
+                        eprintln!("Erro ao processar cliente: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("Erro ao aceitar conexão: {}", e);
+            }
         }
     }
-    Ok(())
 }
 
 fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
+    let status = get_status();
+    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
+
+    client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+
+    match peek_stream(client_stream) {
+        Ok(data_str) => {
+            if data_str.contains("HTTP") {
+                let _ = client_stream.read(&mut vec![0; 1024]);
+                let payload_str = data_str.to_lowercase();
+                if payload_str.contains("websocket") || payload_str.contains("ws") {
+                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
     let addr_proxy = determine_proxy(client_stream)?;
-    let mut server_stream = TcpStream::connect(addr_proxy)?;
-    
+
+    let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
+
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
     let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
 
-    let client_to_server = thread::spawn(move || transfer_data(&mut client_read, &mut server_write));
-    let server_to_client = thread::spawn(move || transfer_data(&mut server_read, &mut client_write));
+    let client_to_server = thread::spawn(move || {
+        transfer_data(&mut client_read, &mut server_write);
+    });
+
+    let server_to_client = thread::spawn(move || {
+        transfer_data(&mut server_read, &mut client_write);
+    });
 
     client_to_server.join().ok();
     server_to_client.join().ok();
@@ -119,51 +77,111 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
         match read_stream.read(&mut buffer) {
-            Ok(0) => break, // Conexão encerrada
+            Ok(0) => {
+                // Conexão encerrada pelo cliente
+                eprintln!("Conexão encerrada pelo cliente.");
+                break;
+            }
             Ok(n) => {
-                if write_stream.write_all(&buffer[..n]).is_err() {
+                if n > MAX_BUFFER_SIZE {
+                    eprintln!("Requisição excede o tamanho máximo permitido.");
+                    break;
+                }
+                if let Err(e) = write_stream.write_all(&buffer[..n]) {
+                    eprintln!("Erro de escrita: {}. Encerrando conexão.", e);
                     break;
                 }
             }
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("Erro de leitura: {}. Encerrando conexão.", e);
+                break;
+            }
+        }
+    }
+
+    // Fechar streams ao final
+    read_stream.shutdown(Shutdown::Read).ok();
+    write_stream.shutdown(Shutdown::Write).ok();
+}
+
+fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 1024];
+    let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
+    let data = &peek_buffer[..bytes_peeked];
+    let data_str = String::from_utf8_lossy(data);
+    Ok(data_str.to_string())
+}
+
+fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
+    let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
+        if data_str.contains("SSH") {
+            get_ssh_address()
+        } else if data_str.contains("OpenVPN") {
+            get_openvpn_address()
+        } else {
+            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            get_openvpn_address()
+        }
+    } else {
+        eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
+        get_openvpn_address()
+    };
+
+    Ok(addr_proxy)
+}
+
+fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
+    let mut retries = 0;
+    let max_retries = 5;
+    let mut delay = Duration::from_secs(1);
+
+    loop {
+        match TcpStream::connect(addr_proxy) {
+            Ok(stream) => return Ok(stream),
+            Err(e) if retries < max_retries => {
+                eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
+                thread::sleep(delay);
+                retries += 1;
+                delay *= 2;
+            }
+            Err(e) => {
+                eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
+                return Err(e);
+            }
         }
     }
 }
 
-// ------------------------- UTILITÁRIOS ---------------------------------
-
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
-}
-
-fn load_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    Ok(private_key(&mut BufReader::new(File::open(path)?))
-        .unwrap()
-        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Chave privada não encontrada"))?)
-}
-
-fn determine_proxy(_: &TcpStream) -> Result<String, Error> {
-    Ok("127.0.0.1:1194".to_string()) // Exemplo padrão
-}
-
-fn get_mode() -> String {
-    env::args()
-        .nth(2)
-        .unwrap_or_else(|| "tls".to_string()) // Default: TLS
-}
-
 fn get_port() -> u16 {
-    env::args()
-        .nth(1)
-        .unwrap_or_else(|| "80".to_string())
-        .parse()
-        .unwrap_or(80)
+    let args: Vec<String> = env::args().collect();
+    let mut port = 80;
+    for i in 1..args.len() {
+        if args[i] == "--port" {
+            if i + 1 < args.len() {
+                port = args[i + 1].parse().unwrap_or(80);
+            }
+        }
+    }
+    port
 }
 
-fn get_cert() -> String {
-    "/opt/rustymanager/ssl/cert.pem".to_string()
+fn get_status() -> String {
+    let args: Vec<String> = env::args().collect();
+    let mut status = String::from("@RustyManager");
+    for i in 1..args.len() {
+        if args[i] == "--status" {
+            if i + 1 < args.len() {
+                status = args[i + 1].clone();
+            }
+        }
+    }
+    status
 }
 
-fn get_key() -> String {
-    "/opt/rustymanager/ssl/key.pem".to_string()
+fn get_ssh_address() -> String {
+    env::var("SSH_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:22"))
+}
+
+fn get_openvpn_address() -> String {
+    env::var("OPENVPN_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:1194"))
 }
