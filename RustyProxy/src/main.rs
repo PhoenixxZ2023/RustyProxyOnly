@@ -162,5 +162,5 @@ fn get_openvpn_address() -> String {
 }
 
 fn get_http_proxy_address() -> String {
-    env::var("HTTP_PROXY_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into())
+    env::var("HTTP_PROXY_ADDR").unwrap_or_else(|_| "127.0.0.1:80".into())
 }
