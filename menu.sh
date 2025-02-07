@@ -1,9 +1,6 @@
 #!/bin/bash
 
-# Configurações
 PORTS_FILE="/opt/rustyproxy/ports"
-SERVICE_DIR="/etc/systemd/system/rustyproxy"
-BIN_PATH="/opt/rustyproxy/proxy"
 
 # Cores
 BOLD="\033[1m"
@@ -14,7 +11,7 @@ RED="\033[31m"
 YELLOW="\033[33m"
 RESET="\033[0m"
 
-# Verificar root
+# Função para verificar se o script está sendo executado como root
 verificar_usuario_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo -e "${RED}${BOLD}O SCRIPT DEVE SER EXECUTADO COMO ROOT. UTILIZE 'SUDO' PARA EXECUTAR O SCRIPT.${RESET}"
@@ -22,118 +19,91 @@ verificar_usuario_root() {
     fi
 }
 
-# Verificar dependências
-check_dependencies() {
-    local missing=()
-    command -v systemctl >/dev/null || missing+=("systemctl")
-    command -v ss >/dev/null || command -v netstat >/dev/null || missing+=("ss/netstat")
-    
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${RED}${BOLD}Erro: Dependências ausentes: ${missing[*]}${RESET}"
-        exit 1
-    fi
-}
-
-# Verificar porta em uso
+# Função para verificar se uma porta está em uso
 is_port_in_use() {
     local port=$1
-    if command -v ss &>/dev/null; then
-        ss -tuln | grep -q ":${port} "
+    if lsof -i :$port > /dev/null 2>&1; then
+        return 0
     else
-        netstat -tuln | grep -q ":${port} "
+        return 1
     fi
 }
 
-# Adicionar porta
+# Função para abrir uma porta de proxy
 add_proxy_port() {
     local port=$1
     local status=${2:-"@RustyProxy"}
-    
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-        echo -e "${RED}${BOLD}PORTA INVÁLIDA!${RESET}"
-        return 1
+
+    if is_port_in_use $port; then
+        echo -e "${RED}${BOLD}A PORTA $port JÁ ESTÁ EM USO.${RESET}"
+        return
     fi
 
-    if grep -q "^${port}$" "$PORTS_FILE"; then
-        echo -e "${RED}${BOLD}PORTA JÁ ESTÁ EM USO!${RESET}"
-        return 1
-    fi
-
-    if is_port_in_use "$port"; then
-        echo -e "${RED}${BOLD}PORTA JÁ ESTÁ EM USO POR OUTRO SERVIÇO!${RESET}"
-        return 1
-    fi
-
-    local service_file="${SERVICE_DIR}/rustyproxy-proxy${port}.service"
-    sudo mkdir -p "$SERVICE_DIR"
-    
-    cat << EOF | sudo tee "$service_file" >/dev/null
-[Unit]
+    local command="/opt/rustyproxy/proxy --port $port --status $status"
+    local service_file_path="/etc/systemd/system/rustyproxy-proxy${port}.service"
+    local service_file_content="[Unit]
 Description=RustyProxy${port}
 After=network.target
 
 [Service]
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitMEMLOCK=infinity
+LimitSTACK=infinity
+LimitCORE=0
+LimitAS=infinity
+LimitRSS=infinity
+LimitCPU=infinity
+LimitFSIZE=infinity
 Type=simple
-ExecStart=${BIN_PATH} --port ${port} --status "${status}"
+ExecStart=${command}
 Restart=always
-RestartSec=5
-LimitNOFILE=65535
+StandardOutput=syslog
+StandardError=syslog
 SyslogIdentifier=rustyproxy-proxy${port}
 
 [Install]
-WantedBy=multi-user.target
-EOF
+WantedBy=multi-user.target"
 
+    sudo mkdir -p /etc/systemd/system/rustyproxy
+    echo "$service_file_content" | sudo tee "$service_file_path" > /dev/null
     sudo systemctl daemon-reload
     sudo systemctl enable "rustyproxy-proxy${port}.service"
     sudo systemctl start "rustyproxy-proxy${port}.service"
     
     if systemctl is-active --quiet "rustyproxy-proxy${port}.service"; then
-        echo "$port" | sudo tee -a "$PORTS_FILE" >/dev/null
         echo -e "${GREEN}${BOLD}PORTA $port ABERTA COM SUCESSO.${RESET}"
+        echo $port | sudo tee -a "$PORTS_FILE" > /dev/null
     else
-        echo -e "${RED}${BOLD}FALHA AO INICIAR SERVIÇO!${RESET}"
-        sudo rm -f "$service_file"
-        return 1
+        echo -e "${RED}${BOLD}FALHA AO ABRIR A PORTA $port. VERIFIQUE OS LOGS DO SISTEMA PARA MAIS DETALHES.${RESET}"
     fi
 }
 
-# Remover porta
+# Função para fechar uma porta de proxy
 del_proxy_port() {
     local port=$1
-    
-    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}${BOLD}PORTA INVÁLIDA!${RESET}"
-        return 1
-    fi
 
-    local service="rustyproxy-proxy${port}.service"
-    
-    if [ ! -f "${SERVICE_DIR}/${service}" ]; then
-        echo -e "${RED}${BOLD}SERVIÇO NÃO ENCONTRADO!${RESET}"
-        return 1
-    fi
-
-    sudo systemctl stop "$service"
-    sudo systemctl disable "$service"
-    sudo rm -f "${SERVICE_DIR}/${service}"
+    sudo systemctl disable "rustyproxy-proxy${port}.service"
+    sudo systemctl stop "rustyproxy-proxy${port}.service"
+    sudo rm -f "/etc/systemd/system/rustyproxy-proxy${port}.service"
     sudo systemctl daemon-reload
-    sudo sed -i "/^${port}$/d" "$PORTS_FILE"
-    
+
+    sed -i "/^$port$/d" "$PORTS_FILE"
     echo -e "${GREEN}${BOLD}PORTA $port FECHADA COM SUCESSO.${RESET}"
 }
 
-# Menu principal
+# Função para exibir o menu formatado
 show_menu() {
     clear
     echo -e "\033[1;36m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m"
-    echo -e "\033[1;36m┃\033[44;1;37m              MULTI-PROXY              \033[0m\033[1;36m┃"
+    echo -e "\033[1;36m┃\E[44;1;37m              MULTI-PROXY              \E[0m\033[0;36m┃"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┃\033[1;33mGERENCIAMENTO DE PORTAS - MULTI-PROXY  \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
 
+    # Exibe portas ativas, se houver
     if [ -s "$PORTS_FILE" ]; then
-        active_ports=$(tr '\n' ' ' < "$PORTS_FILE")
+        active_ports=$(paste -sd ' ' "$PORTS_FILE")
         echo -e "\033[1;36m┃\033[1;33mPORTAS ATIVAS:\033[1;33m $(printf '%-21s' "$active_ports")   \033[1;36m┃\033[0m"
     fi
 
@@ -142,47 +112,47 @@ show_menu() {
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m02\033[1;31m] \033[1;37m• \033[1;33mFECHAR PORTA                    \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m00\033[1;31m] \033[1;37m• \033[1;33mSAIR DO MENU                    \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
-    echo -e "\033[1;36m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
+    echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
     read -p "┗━➤ SELECIONE UMA OPÇÃO: " option
 
     case $option in
         1)
             read -p "━➤ DIGITE A PORTA: " port
             while ! [[ $port =~ ^[0-9]+$ ]]; do
-                echo -e "${RED}━➤ DIGITE UMA PORTA VÁLIDA.${RESET}"
+                echo "━➤ DIGITE UMA PORTA VÁLIDA."
                 read -p "━➤ DIGITE A PORTA: " port
             done
             read -p "━➤ DIGITE UM STATUS DE CONEXÃO (deixe vazio para o padrão): " status
             add_proxy_port $port "$status"
-            read -p "━➤ PRESSIONE ENTER PARA CONTINUAR..." dummy
+            read -p "━➤ PORTA ATIVADA COM SUCESSO. PRESSIONE QUALQUER TECLA." dummy
             ;;
         2)
             read -p "━➤ DIGITE A PORTA: " port
             while ! [[ $port =~ ^[0-9]+$ ]]; do
-                echo -e "${RED}━➤ DIGITE UMA PORTA VÁLIDA.${RESET}"
+                echo "━➤ DIGITE UMA PORTA VÁLIDA."
                 read -p "━➤ DIGITE A PORTA: " port
             done
             del_proxy_port $port
-            read -p "━➤ PRESSIONE ENTER PARA CONTINUAR..." dummy
+            read -p "━➤ PORTA DESATIVADA COM SUCESSO. PRESSIONE QUALQUER TECLA." dummy
             ;;
         0)
             exit 0
             ;;
         *)
-            echo -e "${RED}OPÇÃO INVÁLIDA!${RESET}"
-            read -p "PRESSIONE ENTER PARA CONTINUAR..." dummy
+            echo "OPÇÃO INVÁLIDA. PRESSIONE QUALQUER TECLA PARA RETORNAR AO MENU."
+            read -n 1 dummy
             ;;
     esac
 }
 
-# Inicialização
+# Verificar se o script está sendo executado como root
 verificar_usuario_root
-check_dependencies
 
-# Criar estrutura inicial
-sudo mkdir -p "$(dirname "$PORTS_FILE")"
-sudo touch "$PORTS_FILE"
-sudo chmod 777 "$PORTS_FILE"
+# Verificar se o arquivo de portas existe, caso contrário, criar e definir permissões
+if [ ! -f "$PORTS_FILE" ]; then
+    sudo touch "$PORTS_FILE"
+    sudo chmod 777 "$PORTS_FILE"
+fi
 
 # Loop do menu
 while true; do
