@@ -1,64 +1,61 @@
 use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
 const MAX_BUFFER_SIZE: usize = 8192;
 
 fn main() {
-    let port = get_port();
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap_or_else(|e| {
-        eprintln!("Failed to start listener: {}", e);
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap_or_else(|e| {
+        eprintln!("Erro ao iniciar o listener: {}", e);
         std::process::exit(1);
     });
-    println!("Proxy started on port {}", port);
+    println!("Proxy iniciado na porta {}", get_port());
     start_http(listener);
 }
 
 fn start_http(listener: TcpListener) {
     for stream in listener.incoming() {
         match stream {
-            Ok(client_stream) => {
+            Ok(mut client_stream) => {
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(client_stream) {
-                        eprintln!("Client handling error: {}", e);
+                    if let Err(e) = handle_client(&mut client_stream) {
+                        eprintln!("Erro ao processar cliente: {}", e);
                     }
                 });
             }
             Err(e) => {
-                eprintln!("Connection accept error: {}", e);
+                eprintln!("Erro ao aceitar conexão: {}", e);
             }
         }
     }
 }
 
-fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
+fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
+    let status = get_status();
+    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
+
     client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     client_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
-    let data_str = peek_stream(&client_stream)?;
-    let is_http = data_str.contains("HTTP");
-    let is_websocket = data_str.contains("websocket") || data_str.contains("Upgrade: websocket");
-
-    if is_http {
-        if is_websocket {
-            // Perform WebSocket handshake
-            let response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
-            client_stream.write_all(response.as_bytes())?;
-        } else {
-            // Handle regular HTTP
-            let status = get_status();
-            client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
+    match peek_stream(client_stream) {
+        Ok(data_str) => {
+            if data_str.contains("HTTP") {
+                let _ = client_stream.read(&mut vec![0; 1024]);
+                let payload_str = data_str.to_lowercase();
+                if payload_str.contains("websocket") || payload_str.contains("ws") {
+                    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
+                }
+            }
         }
+        Err(e) => return Err(e),
     }
 
-    let addr_proxy = determine_proxy(&data_str)?;
+    let addr_proxy = determine_proxy(client_stream)?;
 
-    let mut server_stream = attempt_connection_with_backoff(&addr_proxy)?;
-    server_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    server_stream.set_write_timeout(Some(Duration::from_secs(30)))?;
+    let server_stream = attempt_connection_with_backoff(&addr_proxy)?;
 
-    // Split streams after handshake
     let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
     let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
 
@@ -80,87 +77,121 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
     let mut buffer = [0; MAX_BUFFER_SIZE];
     loop {
         match read_stream.read(&mut buffer) {
-            Ok(0) => break, // Connection closed
+            Ok(0) => {
+                // Conexão encerrada pelo cliente
+                eprintln!("Conexão encerrada pelo cliente.");
+                break;
+            }
             Ok(n) => {
+                if n > MAX_BUFFER_SIZE {
+                    eprintln!("Requisição excede o tamanho máximo permitido.");
+                    break;
+                }
                 if let Err(e) = write_stream.write_all(&buffer[..n]) {
-                    eprintln!("Write error: {}", e);
+                    eprintln!("Erro de escrita: {}. Encerrando conexão.", e);
                     break;
                 }
             }
             Err(e) => {
-                eprintln!("Read error: {}", e);
+                eprintln!("Erro de leitura: {}. Encerrando conexão.", e);
                 break;
             }
         }
     }
 
-    // Gracefully shutdown
-    let _ = read_stream.shutdown(Shutdown::Read);
-    let _ = write_stream.shutdown(Shutdown::Write);
+    // Fechar streams ao final
+    read_stream.shutdown(Shutdown::Read).ok();
+    write_stream.shutdown(Shutdown::Write).ok();
 }
 
-fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = [0; 1024];
-    let bytes_peeked = stream.peek(&mut peek_buffer)?;
-    Ok(String::from_utf8_lossy(&peek_buffer[..bytes_peeked]).into_owned())
+fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 1024];
+    let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
+    let data = &peek_buffer[..bytes_peeked];
+    let data_str = String::from_utf8_lossy(data);
+    Ok(data_str.to_string())
 }
 
-fn determine_proxy(data: &str) -> Result<String, Error> {
-    if data.starts_with("SSH") {
-        Ok(get_ssh_address())
-    } else if data.contains("OpenVPN") {
-        Ok(get_openvpn_address())
+fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
+    if let Ok(data_str) = peek_stream(client_stream) {
+        // Verificar se o tráfego corresponde a padrões específicos
+        if is_ssh_traffic(&data_str) {
+            return Ok(get_ssh_address());
+        } else if is_openvpn_traffic(&data_str) {
+            return Ok(get_openvpn_address());
+        } else {
+            eprintln!("Tráfego não identificado. Conectando ao proxy OpenVPN por padrão.");
+        }
     } else {
-        // Default to HTTP proxy or other
-        Ok(get_http_proxy_address())
+        eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
     }
+
+    Ok(get_openvpn_address())
 }
 
-fn attempt_connection_with_backoff(addr: &str) -> Result<TcpStream, Error> {
+fn is_ssh_traffic(data: &str) -> bool {
+    // Verifica se os primeiros bytes indicam tráfego SSH (por exemplo, "SSH-2.0")
+    data.starts_with("SSH-")
+}
+
+fn is_openvpn_traffic(data: &str) -> bool {
+    // Verifica se o tráfego contém padrões comuns do OpenVPN
+    // Exemplo: OpenVPN usa protocolos UDP/TLS com cabeçalhos conhecidos
+    data.contains("OpenVPN") || data.contains("P_CONTROL_HARD_RESET_CLIENT_V2")
+}
+
+fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
     let mut retries = 0;
     let max_retries = 5;
     let mut delay = Duration::from_secs(1);
 
     loop {
-        match TcpStream::connect(addr) {
+        match TcpStream::connect(addr_proxy) {
             Ok(stream) => return Ok(stream),
             Err(e) if retries < max_retries => {
-                eprintln!("Connection to {} failed ({}), retrying in {}s...", addr, e, delay.as_secs());
+                eprintln!("Erro ao conectar ao proxy {}. Tentando novamente em {} segundos...", addr_proxy, delay.as_secs());
                 thread::sleep(delay);
                 retries += 1;
                 delay *= 2;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                eprintln!("Falha ao conectar ao proxy {} após {} tentativas: {}", addr_proxy, retries, e);
+                return Err(e);
+            }
         }
     }
 }
 
 fn get_port() -> u16 {
-    env::args()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find(|w| w[0] == "--port")
-        .and_then(|w| w[1].parse().ok())
-        .unwrap_or(80)
+    let args: Vec<String> = env::args().collect();
+    let mut port = 80;
+    for i in 1..args.len() {
+        if args[i] == "--port" {
+            if i + 1 < args.len() {
+                port = args[i + 1].parse().unwrap_or(80);
+            }
+        }
+    }
+    port
 }
 
 fn get_status() -> String {
-    env::args()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find(|w| w[0] == "--status")
-        .map(|w| w[1].clone())
-        .unwrap_or_else(|| "@RustyManager".into())
+    let args: Vec<String> = env::args().collect();
+    let mut status = String::from("@RustyManager");
+    for i in 1..args.len() {
+        if args[i] == "--status" {
+            if i + 1 < args.len() {
+                status = args[i + 1].clone();
+            }
+        }
+    }
+    status
 }
 
 fn get_ssh_address() -> String {
-    env::var("SSH_PROXY_ADDR").unwrap_or_else(|_| "127.0.0.1:22".into())
+    env::var("SSH_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:22"))
 }
 
 fn get_openvpn_address() -> String {
-    env::var("OPENVPN_PROXY_ADDR").unwrap_or_else(|_| "127.0.0.1:1194".into())
-}
-
-fn get_http_proxy_address() -> String {
-    env::var("HTTP_PROXY_ADDR").unwrap_or_else(|_| "127.0.0.1:80".into())
+    env::var("OPENVPN_PROXY_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:1194"))
 }
