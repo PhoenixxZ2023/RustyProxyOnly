@@ -113,31 +113,21 @@ fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
 }
 
 fn determine_proxy(client_stream: &mut TcpStream) -> Result<String, Error> {
-    if let Ok(data_str) = peek_stream(client_stream) {
-        // Verificar se o tráfego corresponde a padrões específicos
-        if is_ssh_traffic(&data_str) {
-            return Ok(get_ssh_address());
-        } else if is_openvpn_traffic(&data_str) {
-            return Ok(get_openvpn_address());
+    let addr_proxy = if let Ok(data_str) = peek_stream(client_stream) {
+        if data_str.contains("SSH") {
+            get_ssh_address()
+        } else if data_str.contains("OpenVPN") {
+            get_openvpn_address()
         } else {
-            eprintln!("Tráfego não identificado. Conectando ao proxy OpenVPN por padrão.");
+            eprintln!("Tipo de tráfego desconhecido, conectando ao proxy OpenVPN por padrão.");
+            get_openvpn_address()
         }
     } else {
         eprintln!("Erro ao tentar ler dados do cliente. Conectando ao OpenVPN por padrão.");
-    }
+        get_openvpn_address()
+    };
 
-    Ok(get_openvpn_address())
-}
-
-fn is_ssh_traffic(data: &str) -> bool {
-    // Verifica se os primeiros bytes indicam tráfego SSH (por exemplo, "SSH-2.0")
-    data.starts_with("SSH-")
-}
-
-fn is_openvpn_traffic(data: &str) -> bool {
-    // Verifica se o tráfego contém padrões comuns do OpenVPN
-    // Exemplo: OpenVPN usa protocolos UDP/TLS com cabeçalhos conhecidos
-    data.contains("OpenVPN") || data.contains("P_CONTROL_HARD_RESET_CLIENT_V2")
+    Ok(addr_proxy)
 }
 
 fn attempt_connection_with_backoff(addr_proxy: &str) -> Result<TcpStream, Error> {
