@@ -156,7 +156,7 @@ fn get_port() -> u16 {
         .windows(2)
         .find(|w| w[0] == "--port")
         .and_then(|w| w[1].parse().ok())
-        .unwrap_or(8080)
+        .unwrap_or(80)
 }
 
 fn get_ssh_address() -> String {
