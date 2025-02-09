@@ -73,7 +73,7 @@ else
 
     # ---->>>> Instalação de pacotes requisitos e atualização do sistema
     show_progress "ATUALIZANDO O SISTEMA..."
-    apt update -y > /dev/null 2>&1 || error_exit "FALHA AO ATUALIZAR O SISTEMA"
+    apt upgrade -y > /dev/null 2>&1 || error_exit "FALHA AO ATUALIZAR O SISTEMA"
     apt-get install curl build-essential git -y > /dev/null 2>&1 || error_exit "FALHA AO INSTALAR PACOTES"
     increment_step
 
@@ -92,12 +92,6 @@ else
 
     # ---->>>> Instalar o RustyProxy
     show_progress "COMPILANDO RUSTYPROXY, ISSO PODE LEVAR ALGUM TEMPO DEPENDENDO DA MAQUINA..."
-
-    if [ -d "/root/RustyProxyOnly" ]; then
-        rm -rf /root/RustyProxyOnly
-    fi
-
-    
     git clone https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "FALHA AO CLONAR RUSTYPROXY"
     mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu
     cd /root/RustyProxyOnly/RustyProxy
