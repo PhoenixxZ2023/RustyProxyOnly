@@ -139,7 +139,7 @@ fn get_http_backend(websocket: bool) -> String {
 fn get_port() -> u16 {
     get_arg_value("--port")
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8080)
+        .unwrap_or(80)
 }
 
 fn get_status() -> String {
