@@ -4,10 +4,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
-// Constantes configuráveis atualizadas
+// Constantes configuráveis
 const PORTA_PADRAO: u16 = 8080;
-const TAMANHO_BUFFER: usize = 8192;    // Buffer principal de 8KB
-const TAMANHO_PEEK: usize = 1024;      // 8192 / 8 = 1024
+const TAMANHO_BUFFER: usize = 4096;
 const TIMEOUT_CONEXAO: u64 = 10;
 
 fn main() {
@@ -40,6 +39,7 @@ fn iniciar_servidor(listener: TcpListener, status: String) {
 }
 
 fn lidar_conexao_cliente(mut stream_cliente: TcpStream, status: &str) -> Result<(), Error> {
+    // Detectar protocolo e definir servidor alvo
     let (addr_servidor, eh_http) = detectar_protocolo(&stream_cliente)?;
     
     println!("🔌 Nova conexão de: {}", stream_cliente.peer_addr()?);
@@ -48,12 +48,15 @@ fn lidar_conexao_cliente(mut stream_cliente: TcpStream, status: &str) -> Result<
     let mut stream_servidor = TcpStream::connect(addr_servidor)
         .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor: {}", e)))?;
 
+    // Configurar timeouts
     stream_cliente.set_read_timeout(Some(Duration::from_secs(TIMEOUT_CONEXAO)))?;
     stream_servidor.set_read_timeout(Some(Duration::from_secs(TIMEOUT_CONEXAO)))?;
 
+    // Clonar streams para comunicação bidirecional
     let (mut cliente_leitura, mut cliente_escrita) = (stream_cliente.try_clone()?, stream_cliente.try_clone()?);
     let (mut servidor_leitura, mut servidor_escrita) = (stream_servidor.try_clone()?, stream_servidor);
 
+    // Threads para transferência de dados
     let cliente_para_servidor = thread::spawn(move || {
         transferir_dados(
             &mut cliente_leitura,
@@ -72,6 +75,7 @@ fn lidar_conexao_cliente(mut stream_cliente: TcpStream, status: &str) -> Result<
         )
     });
 
+    // Aguardar conclusão das threads
     let _ = cliente_para_servidor.join();
     let _ = servidor_para_cliente.join();
 
@@ -110,12 +114,13 @@ fn transferir_dados(
     eh_http: bool,
     status: &str,
 ) -> Result<(), Error> {
-    let mut buffer = [0; TAMANHO_BUFFER]; // Buffer principal de 8KB
+    let mut buffer = [0; TAMANHO_BUFFER];
     
     loop {
         match origem.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) => break, // Conexão fechada
             Ok(bytes_lidos) => {
+                // Modificar resposta HTTP se necessário
                 let dados_modificados = if eh_http {
                     modificar_resposta_http(&buffer[..bytes_lidos], status)
                 } else {
@@ -148,13 +153,13 @@ fn modificar_resposta_http(dados: &[u8], status: &str) -> Vec<u8> {
 }
 
 fn inspecionar_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut buffer = [0; TAMANHO_PEEK]; // Buffer de peek de 1KB
+    let mut buffer = [0; 1024];
     let bytes_lidos = stream.peek(&mut buffer)?;
-    
     String::from_utf8(buffer[..bytes_lidos].to_vec())
         .map_err(|_| Error::new(ErrorKind::InvalidData, "Dados não são UTF-8 válido"))
 }
 
+// Funções para tratamento de argumentos da linha de comando
 fn obter_porta_argumento() -> u16 {
     env::args()
         .collect::<Vec<String>>()
