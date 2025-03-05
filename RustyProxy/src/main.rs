@@ -1,117 +1,149 @@
 use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
 fn main() {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", obter_porta())).unwrap();
-    iniciar_http(listener);
+    let port = get_port();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
+    start_proxy(listener);
 }
 
-fn iniciar_http(listener: TcpListener) {
+fn start_proxy(listener: TcpListener) {
     for stream in listener.incoming() {
         match stream {
-            Ok(mut client_stream) => {
+            Ok(client_stream) => {
                 thread::spawn(move || {
-                    manipular_cliente(&mut client_stream);
+                    handle_client(client_stream);
                 });
             }
-            Err(e) => eprintln!("Erro na conexão: {}", e),
+            Err(e) => {
+                eprintln!("Error accepting connection: {}", e);
+            }
         }
     }
 }
 
-fn manipular_cliente(client_stream: &mut TcpStream) {
-    let (mut addr_proxy, mut is_http) = (obter_backend_ssh(), false);
+fn handle_client(mut client_stream: TcpStream) {
+    let mut backend_addr = get_backend_addr(); // Default backend
 
-    // Fase 1: Detecção Inicial de Protocolo
-    match inspecionar_stream(client_stream) {
+    // Peek the initial data to determine protocol
+    match peek_stream(&client_stream) {
         Ok(data_str) => {
             if data_str.starts_with("HTTP") {
-                is_http = true;
-                addr_proxy = obter_backend_http();
-                
-                // Handshake WebSocket
+                // Check for WebSocket upgrade
                 if data_str.contains("Upgrade: websocket") {
-                    if let Ok(ws_backend) = obter_backend_websocket() {
-                        addr_proxy = ws_backend;
-                        if realizar_handshake_websocket(client_stream).is_err() {
-                            return;
-                        }
+                    if let Ok(ws_backend) = get_websocket_backend() {
+                        backend_addr = ws_backend;
                     }
                 } else {
-                    if enviar_resposta_http(client_stream).is_err() {
-                        return;
-                    }
+                    backend_addr = get_http_backend();
                 }
             } else if data_str.starts_with("SSH-") {
-                addr_proxy = obter_backend_ssh();
+                backend_addr = get_ssh_backend();
             } else {
-                addr_proxy = obter_backend_openvpn();
+                backend_addr = get_openvpn_backend();
             }
         }
-        Err(_) => return,
+        Err(e) => {
+            eprintln!("Peek failed: {}", e);
+            return;
+        }
     }
 
-    // Fase 2: Conexão com Backend
-    let mut server_stream = match TcpStream::connect(&addr_proxy) {
+    // Connect to the determined backend
+    let mut server_stream = match TcpStream::connect(&backend_addr) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Falha na conexão com {}: {}", addr_proxy, e);
+            eprintln!("Failed to connect to backend {}: {}", backend_addr, e);
             return;
         }
     };
 
-    // Fase 3: Proxy Bidirecional
-    let (mut client_read, mut client_write) = (client_stream.try_clone().unwrap(), client_stream.try_clone().unwrap());
-    let (mut server_read, mut server_write) = (server_stream.try_clone().unwrap(), server_stream);
+    // Clone client and server streams, handling potential errors
+    let client_clone = match client_stream.try_clone() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to clone client stream: {}", e);
+            return;
+        }
+    };
+    let server_clone = match server_stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to clone server stream: {}", e);
+            return;
+        }
+    };
 
-    let handles = vec![
-        thread::spawn(move || transferir_dados(&mut client_read, &mut server_write)),
-        thread::spawn(move || transferir_dados(&mut server_read, &mut client_write)),
-    ];
+    let (mut client_read, mut client_write) = (client_clone, client_stream);
+    let (mut server_read, mut server_write) = (server_clone, server_stream);
 
-    for handle in handles {
-        let _ = handle.join();
+    // Transfer data between client and server
+    let client_to_server = thread::spawn(move || {
+        transfer_data(&mut client_read, &mut server_write);
+    });
+
+    let server_to_client = thread::spawn(move || {
+        transfer_data(&mut server_read, &mut client_write);
+    });
+
+    let _ = client_to_server.join();
+    let _ = server_to_client.join();
+}
+
+fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
+    let mut buffer = [0; 2048];
+    loop {
+        match read_stream.read(&mut buffer) {
+            Ok(0) => break, // Connection closed
+            Ok(n) => {
+                if let Err(e) = write_stream.write_all(&buffer[..n]) {
+                    eprintln!("Write error: {}", e);
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("Read error: {}", e);
+                break;
+            }
+        }
     }
+    let _ = write_stream.shutdown(Shutdown::Both);
 }
 
-// ... (funções transferir_dados e inspecionar_stream mantidas)
-
-// Novas Funções de Configuração
-fn obter_backend_http() -> String {
-    obter_valor_arg("--http-backend").unwrap_or_else(|| "0.0.0.0:80".to_string())
+fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+    let mut buffer = [0; 1024];
+    let bytes_peeked = stream.peek(&mut buffer)?;
+    Ok(String::from_utf8_lossy(&buffer[..bytes_peeked]).to_string())
 }
 
-fn obter_backend_websocket() -> Result<String, &'static str> {
-    obter_valor_arg("--ws-backend").ok_or("Backend WebSocket não configurado")
+// Functions to get backend addresses from command-line arguments
+fn get_backend_addr() -> String {
+    get_arg_value("--backend").unwrap_or_else(|| "0.0.0.0:22".to_string())
 }
 
-fn obter_backend_ssh() -> String {
-    obter_valor_arg("--ssh-backend").unwrap_or_else(|| "0.0.0.0:22".to_string())
+fn get_http_backend() -> String {
+    get_arg_value("--http-backend").unwrap_or_else(|| "0.0.0.0:80".to_string())
 }
 
-fn obter_backend_openvpn() -> String {
-    obter_valor_arg("--ovpn-backend").unwrap_or_else(|| "0.0.0.0:1194".to_string())
+fn get_websocket_backend() -> Result<String, &'static str> {
+    get_arg_value("--ws-backend").ok_or("WebSocket backend not specified")
 }
 
-fn obter_valor_arg(arg: &str) -> Option<String> {
-    env::args().position(|a| a == arg).and_then(|i| env::args().nth(i + 1))
+fn get_ssh_backend() -> String {
+    get_arg_value("--ssh-backend").unwrap_or_else(|| "0.0.0.0:22".to_string())
 }
 
-// Handshake WebSocket Correto
-fn realizar_handshake_websocket(stream: &mut TcpStream) -> Result<(), Error> {
-    let resposta = "HTTP/1.1 101 Switching Protocols\r\n\
-                   Upgrade: websocket\r\n\
-                   Connection: Upgrade\r\n\
-                   Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
-    stream.write_all(resposta.as_bytes())
+fn get_openvpn_backend() -> String {
+    get_arg_value("--ovpn-backend").unwrap_or_else(|| "0.0.0.0:1194".to_string())
 }
 
-// Resposta HTTP Genérica
-fn enviar_resposta_http(stream: &mut TcpStream) -> Result<(), Error> {
-    let status = obter_status();
-    let resposta = format!("HTTP/1.1 200 {}\r\nContent-Length: 0\r\n\r\n", status);
-    stream.write_all(resposta.as_bytes())
+fn get_arg_value(arg: &str) -> Option<String> {
+    let args: Vec<String> = env::args().collect();
+    args.iter().position(|a| a == arg).and_then(|i| args.get(i + 1)).cloned()
+}
+
+fn get_port() -> u16 {
+    get_arg_value("--port").and_then(|p| p.parse().ok()).unwrap_or(80)
 }
