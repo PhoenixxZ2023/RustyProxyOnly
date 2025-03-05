@@ -1,16 +1,5 @@
 [package]
-name = "rustyproxy"
-version = "0.1.0"
+name = "RustyProxy"
 edition = "2021"
-authors = ["Seu Nome <seu.email@exemplo.com>"]
-description = "Proxy TCP de alta performance em Rust"
-license = "MIT"
 
 [dependencies]
-tokio = { version = "1.37", features = ["full"] }  # Runtime assíncrono
-anyhow = "1.0"                                     # Manipulação simplificada de erros
-clap = { version = "4.5", features = ["derive"] }  # Parse de argumentos CLI
-bytes = "1.6"                                      # Manipulação eficiente de buffers
-log = "0.4"                                        # Sistema de logging
-env_logger = "0.11"                                # Implementação de logger
-thiserror = "1.0"                                  # Erros customizados
