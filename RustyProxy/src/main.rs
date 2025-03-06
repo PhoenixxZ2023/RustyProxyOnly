@@ -81,8 +81,6 @@ fn detect_protocol(data: &str) -> &str {
         "0.0.0.0:22"
     } else if data.starts_with("GET") || data.starts_with("POST") || data.starts_with("HTTP/") {
         "0.0.0.0:80"
-    } else if data.starts_with("\x16\x03") { // TLS
-        "0.0.0.0:443"
     } else {
         "0.0.0.0:1194" // OpenVPN
     }
