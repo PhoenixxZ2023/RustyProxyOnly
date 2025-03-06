@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
-const BUFFER_SIZE: usize = 2048;
+const BUFFER_SIZE: usize = 8192;
 
 fn main() -> io::Result<()> {
     let port = get_port().unwrap_or(80);
