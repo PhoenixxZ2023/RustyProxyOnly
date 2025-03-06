@@ -1,4 +1,4 @@
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -12,8 +12,9 @@ fn main() -> io::Result<()> {
     let port = get_port().unwrap_or(80);
     let status = get_status();
     
+    println!("{} iniciado na porta: {}", status, port);
+    
     let listener = TcpListener::bind(("0.0.0.0", port))?;
-    println!("🚀 Proxy iniciado na porta: {}", port);
     
     for stream in listener.incoming() {
         match stream {
@@ -36,7 +37,7 @@ fn handle_client(mut client: TcpStream, status: &str) -> io::Result<()> {
     let client_clone = client.try_clone()?;
     
     thread::spawn(move || {
-        tx.send(peek_stream(&client_clone)).ok();
+        tx.send(read_initial_data(&client_clone)).ok();
     });
     
     let (initial_data, bytes_read) = match rx.recv_timeout(Duration::from_secs(PROTOCOL_TIMEOUT)) {
@@ -44,15 +45,24 @@ fn handle_client(mut client: TcpStream, status: &str) -> io::Result<()> {
         _ => (String::new(), 0),
     };
     
-    let target = detect_protocol(&initial_data);
+    let (target, is_websocket) = detect_protocol(&initial_data);
     println!("🔀 Redirecionando para: {}", target);
+    
+    if target == "0.0.0.0:80" && status != "🚀 Proxy Rust v1.0" && !is_websocket {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            status.len(),
+            status
+        );
+        client.write_all(response.as_bytes())?;
+        client.shutdown(Shutdown::Both)?;
+        return Ok(());
+    }
     
     let mut server = TcpStream::connect(target)?;
     
     if bytes_read > 0 {
-        let mut buffer = vec![0u8; bytes_read];
-        client.read_exact(&mut buffer)?;
-        server.write_all(&buffer)?;
+        server.write_all(&initial_data.as_bytes()[..bytes_read])?;
     }
     
     let (mut client_read, mut client_write) = (client.try_clone()?, client.try_clone()?);
@@ -72,13 +82,21 @@ fn handle_client(mut client: TcpStream, status: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn detect_protocol(data: &str) -> &str {
+fn detect_protocol(data: &str) -> (&str, bool) {
+    let is_websocket = data.contains("Upgrade: websocket");
+    
     if data.starts_with("SSH-") {
-        "0.0.0.0:22"
+        ("0.0.0.0:22", false)
+    } else if data.starts_with("CONNECT") {
+        ("0.0.0.0:443", false)
     } else if data.starts_with("GET") || data.starts_with("POST") || data.starts_with("HTTP/") {
-        "0.0.0.0:80"
+        if is_websocket {
+            ("0.0.0.0:80", true)
+        } else {
+            ("0.0.0.0:8080", false)
+        }
     } else {
-        "0.0.0.0:1194"
+        ("0.0.0.0:1194", false)
     }
 }
 
@@ -104,9 +122,11 @@ fn transfer_data(
     Ok(())
 }
 
-fn peek_stream(stream: &TcpStream) -> io::Result<(String, usize)> {
+fn read_initial_data(stream: &TcpStream) -> io::Result<(String, usize)> {
     let mut buffer = [0u8; PEEK_BUFFER_SIZE];
-    let bytes_read = stream.peek(&mut buffer)?;
+    stream.set_read_timeout(Some(Duration::from_secs(PROTOCOL_TIMEOUT)))?;
+    let bytes_read = stream.read(&mut buffer)?;
+    stream.set_read_timeout(None)?;
     Ok((
         String::from_utf8_lossy(&buffer[..bytes_read]).into_owned(),
         bytes_read
