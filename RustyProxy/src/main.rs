@@ -1,155 +1,87 @@
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
-use clap::{Arg, Command};
-
 fn main() {
-    let matches = Command::new("Rusty Proxy")
-        .version("1.0")
-        .arg(Arg::new("port")
-            .short('p')
-            .long("port")
-            .value_name("PORT")
-            .help("Proxy listening port")
-            .default_value("8080"))
-        .arg(Arg::new("ssh")
-            .long("ssh-port")
-            .value_name("PORT")
-            .help("SSH backend port")
-            .default_value("22"))
-        .arg(Arg::new("ovpn")
-            .long("openvpn-port")
-            .value_name("PORT")
-            .help("OpenVPN backend port")
-            .default_value("1194"))
-        .arg(Arg::new("http")
-            .long("http-port")
-            .value_name("PORT")
-            .help("HTTP backend port")
-            .default_value("80"))
-        .arg(Arg::new("status")
-            .short('s')
-            .long("status")
-            .value_name("TEXT")
-            .help("Custom status message")
-            .default_value("Rusty Proxy"))
-        .get_matches();
-
-    let port = matches.get_one::<String>("port").unwrap();
+    let port = get_port();
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
-    start_proxy(listener, matches);
+    start_http(listener);
 }
 
-fn start_proxy(listener: TcpListener, matches: clap::ArgMatches) {
+fn start_http(listener: TcpListener) {
     for stream in listener.incoming() {
         match stream {
-            Ok(mut client_stream) => {
-                let matches_clone = matches.clone();
+            Ok(client_stream) => {
                 thread::spawn(move || {
-                    handle_client(&mut client_stream, &matches_clone);
+                    handle_client(client_stream);
                 });
             }
-            Err(e) => eprintln!("Connection failed: {}", e),
+            Err(e) => eprintln!("Error accepting connection: {}", e),
         }
     }
 }
 
-fn handle_client(client_stream: &mut TcpStream, matches: &clap::ArgMatches) {
-    let initial_data = match peek_stream(client_stream) {
+fn handle_client(mut client_stream: TcpStream) {
+    // Peek initial data to determine protocol
+    let initial_data = match peek_stream(&client_stream) {
         Ok(data) => data,
         Err(_) => return,
     };
 
-    let status = matches.get_one::<String>("status").unwrap();
-    let (backend_addr, mut initial_response) = detect_protocol(&initial_data, matches, status);
+    if initial_data.starts_with("HTTP") {
+        handle_http(&mut client_stream, initial_data);
+    } else if initial_data.starts_with("SSH-") {
+        proxy_to(&mut client_stream, "0.0.0.0:22");
+    } else {
+        proxy_to(&mut client_stream, "0.0.0.0:1194");
+    }
+}
 
-    let mut server_stream = match TcpStream::connect(&backend_addr) {
-        Ok(stream) => stream,
-        Err(e) => {
-            eprintln!("Failed to connect to {}: {}", backend_addr, e);
-            return;
-        }
-    };
+fn handle_http(client_stream: &mut TcpStream, initial_data: String) {
+    let status = get_status();
+    let is_websocket = initial_data.to_lowercase().contains("websocket") || initial_data.to_lowercase().contains("upgrade: ws");
 
-    if let Some(response) = initial_response.take() {
+    if is_websocket {
+        // Send proper WebSocket upgrade response
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+            Upgrade: websocket\r\n\
+            Connection: Upgrade\r\n\
+            Sec-WebSocket-Accept: {}\r\n\r\n",
+            status // Note: Sec-WebSocket-Accept should be a valid hash, this is simplified
+        );
         if client_stream.write_all(response.as_bytes()).is_err() {
             return;
         }
-    }
-
-    forward_data(client_stream, &mut server_stream, &initial_data);
-}
-
-fn detect_protocol(
-    data: &str,
-    matches: &clap::ArgMatches,
-    status: &str,
-) -> (String, Option<String>) {
-    if data.starts_with("SSH-") {
-        (format!("127.0.0.1:{}", matches.get_one::<String>("ssh").unwrap()), None)
-    } else if data.starts_with("GET ") || data.starts_with("POST ") || data.starts_with("HEAD ") {
-        handle_http_protocol(data, matches, status)
     } else {
-        (format!("127.0.0.1:{}", matches.get_one::<String>("ovpn").unwrap()), None)
-    }
-}
-
-fn handle_http_protocol(
-    data: &str,
-    matches: &clap::ArgMatches,
-    status: &str,
-) -> (String, Option<String>) {
-    let is_websocket = data.contains("Upgrade: websocket") || data.contains("upgrade: websocket");
-    
-    if is_websocket {
-        (
-            format!("127.0.0.1:{}", matches.get_one::<String>("http").unwrap()),
-            Some(
-                "HTTP/1.1 101 Switching Protocols\r\n\
-                Upgrade: websocket\r\n\
-                Connection: Upgrade\r\n\r\n".to_string()
-            )
-        )
-    } else {
-        (
-            format!("127.0.0.1:{}", matches.get_one::<String>("http").unwrap()),
-            Some(format!("HTTP/1.1 200 {}\r\n\r\n", status))
-        )
-    }
-}
-
-fn forward_data(client_stream: &mut TcpStream, server_stream: &mut TcpStream, initial_data: &str) {
-    let (mut client_read, mut client_write) = match client_stream.try_clone() {
-        Ok((read, write)) => (read, write),
-        Err(_) => return,
-    };
-
-    let (mut server_read, mut server_write) = match server_stream.try_clone() {
-        Ok((read, write)) => (read, write),
-        Err(_) => return,
-    };
-
-    // Write initial peeked data to backend
-    if !initial_data.is_empty() {
-        if let Err(e) = server_write.write_all(initial_data.as_bytes()) {
-            eprintln!("Initial write failed: {}", e);
+        // Send generic HTTP response
+        if client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes()).is_err() {
             return;
         }
     }
 
-    let client_to_server = thread::spawn(move || {
+    // After handling HTTP, decide backend (example: proxy to OpenVPN)
+    proxy_to(client_stream, "0.0.0.0:1194");
+}
+
+fn proxy_to(client_stream: &mut TcpStream, addr: &str) {
+    let server_stream = match TcpStream::connect(addr) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let (mut client_read, mut client_write) = (client_stream.try_clone().unwrap(), client_stream.try_clone().unwrap());
+    let (mut server_read, mut server_write) = (server_stream.try_clone().unwrap(), server_stream);
+
+    thread::spawn(move || {
         transfer_data(&mut client_read, &mut server_write);
     });
 
-    let server_to_client = thread::spawn(move || {
+    thread::spawn(move || {
         transfer_data(&mut server_read, &mut client_write);
     });
-
-    client_to_server.join().ok();
-    server_to_client.join().ok();
 }
 
 fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
@@ -162,15 +94,22 @@ fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
                     break;
                 }
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
             Err(_) => break,
         }
     }
-    write_stream.shutdown(Shutdown::Both).ok();
+    let _ = write_stream.shutdown(Shutdown::Both);
 }
 
 fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     let mut buffer = vec![0; 1024];
     let bytes_peeked = stream.peek(&mut buffer)?;
     Ok(String::from_utf8_lossy(&buffer[..bytes_peeked]).to_string())
+}
+
+fn get_port() -> u16 {
+    env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(80)
+}
+
+fn get_status() -> String {
+    env::args().nth(2).unwrap_or_else(|| "OK".into())
 }
