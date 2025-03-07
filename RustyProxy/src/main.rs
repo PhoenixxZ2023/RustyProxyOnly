@@ -4,10 +4,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
-use threadpool::ThreadPool;
-use base64::{engine::general_purpose, Engine};
-use sha1::{Digest, Sha1};
-
 const BUFFER_SIZE: usize = 8192;
 
 fn main() -> io::Result<()> {
