@@ -3,5 +3,3 @@ name = "RustyProxy"
 edition = "2021"
 
 [dependencies]
-sha1 = "0.10"
-base64 = "0.21"
