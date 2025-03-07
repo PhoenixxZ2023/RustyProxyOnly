@@ -1,116 +1,165 @@
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
-fn main() {
-    let port = get_port();
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).unwrap();
-    start_proxy(listener);
-}
+const BUFFER_SIZE: usize = 8192;
 
-fn start_proxy(listener: TcpListener) {
+fn main() -> io::Result<()> {
+    let port = get_port().unwrap_or(80);
+    let status = get_status();
+    
+    let listener = TcpListener::bind(("0.0.0.0", port))?;
+    println!("Proxy listening on port {}", port);
+    
     for stream in listener.incoming() {
         match stream {
-            Ok(client_stream) => {
+            Ok(stream) => {
+                let status = status.clone();
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(client_stream) {
-                        eprintln!("Client handling error: {}", e);
+                    if let Err(e) = handle_client(stream, &status) {
+                        eprintln!("Erro na conexão: {}", e);
                     }
                 });
             }
-            Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
-            }
+            Err(e) => eprintln!("Falha na conexão: {}", e),
         }
     }
+    Ok(())
 }
 
-fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    let initial_data = peek_initial_data(&client_stream)?;
-    let (backend_addr, is_http) = determine_backend(&initial_data);
-    let mut server_stream = TcpStream::connect(backend_addr)
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Failed to connect to backend: {}", e)))?;
-
-    if is_http {
-        handle_http_handshake(&mut client_stream, &initial_data)?;
-        server_stream.write_all(&initial_data)?;
-    } else if !initial_data.is_empty() {
-        server_stream.write_all(&initial_data)?;
+fn handle_client(mut client: TcpStream, status: &str) -> io::Result<()> {
+    let (tx, rx) = mpsc::channel();
+    let client_clone = client.try_clone()?;
+    
+    // Thread para análise inicial com timeout
+    thread::spawn(move || {
+        tx.send(peek_stream(&client_clone)).ok();
+    });
+    
+    // Detecção de protocolo com timeout
+    let initial_data = match rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(data)) => data,
+        _ => String::new(),
+    };
+    
+    // Determinar destino
+    let target = if initial_data.starts_with("SSH-") {
+        "0.0.0.0:22"
+    } else if is_http(&initial_data) {
+        handle_http(&mut client, status, &initial_data)?;
+        if is_websocket(&initial_data) {
+            "0.0.0.0:80" // WebSocket
+        } else {
+            "0.0.0.0:80" // HTTP normal
+        }
+    } else {
+        "0.0.0.0:1194" // OpenVPN
+    };
+    
+    // Conexão com o servidor alvo
+    let mut server = TcpStream::connect(target)?;
+    println!("Redirecionando para: {}", target);
+    
+    // Escrever dados iniciais no servidor
+    if !initial_data.is_empty() {
+        server.write_all(initial_data.as_bytes())?;
     }
-
-    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
-    let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
-
+    
+    // Bidirecional
+    let (mut client_read, mut client_write) = (client.try_clone()?, client.try_clone()?);
+    let (mut server_read, mut server_write) = (server.try_clone()?, server);
+    
     let client_to_server = thread::spawn(move || {
-        transfer_data(&mut client_read, &mut server_write);
+        transfer(&mut client_read, &mut server_write, "Cliente -> Servidor")
     });
-
+    
     let server_to_client = thread::spawn(move || {
-        transfer_data(&mut server_read, &mut client_write);
+        transfer(&mut server_read, &mut client_write, "Servidor -> Cliente")
     });
-
-    let _ = client_to_server.join();
-    let _ = server_to_client.join();
-
+    
+    client_to_server.join().unwrap()?;
+    server_to_client.join().unwrap()?;
+    
     Ok(())
 }
 
-fn determine_backend(initial_data: &[u8]) -> (String, bool) {
-    if initial_data.starts_with(b"SSH-") {
-        ("0.0.0.0:22".to_string(), false)
-    } else if initial_data.starts_with(b"GET ") || 
-              initial_data.starts_with(b"POST ") || 
-              initial_data.starts_with(b"HTTP/") {
-        ("0.0.0.0:80".to_string(), true)
-    } else if initial_data.windows(8).any(|w| w == b"Upgrade") && 
-              initial_data.windows(10).any(|w| w == b"WebSocket") {
-        ("0.0.0.0:8080".to_string(), true)
-    } else {
-        ("0.0.0.0:1194".to_string(), false)
-    }
-}
-
-fn handle_http_handshake(client_stream: &mut TcpStream, initial_data: &[u8]) -> Result<(), Error> {
-    let is_websocket = initial_data.contains(&b"Upgrade: websocket"[..]) || 
-                      initial_data.contains(&b"Upgrade: ws"[..]);
-
-    if is_websocket {
-        client_stream.write_all(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".as_bytes()
-        )?;
-    } else {
-        client_stream.write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())?;
+fn handle_http(client: &mut TcpStream, status: &str, initial_data: &str) -> io::Result<()> {
+    if initial_data.starts_with("GET") {
+        let response = if is_websocket(initial_data) {
+            format!(
+                "HTTP/1.1 101 Switching Protocols\r\n\
+                Upgrade: websocket\r\n\
+                Connection: Upgrade\r\n\
+                Sec-WebSocket-Accept: {}\r\n\r\n",
+                status
+            )
+        } else {
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                Content-Length: {}\r\n\
+                Connection: close\r\n\r\n\
+                {}",
+                status.len(),
+                status
+            )
+        };
+        
+        client.write_all(response.as_bytes())?;
+        client.flush()?;
     }
     Ok(())
 }
 
-fn peek_initial_data(stream: &TcpStream) -> Result<Vec<u8>, Error> {
-    let mut buffer = vec![0; 1024];
-    let bytes_read = stream.peek(&mut buffer)?;
-    Ok(buffer[..bytes_read].to_vec())
+fn is_http(data: &str) -> bool {
+    data.starts_with("GET") || 
+    data.starts_with("POST") || 
+    data.starts_with("HTTP/")
 }
 
-fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
-    let mut buffer = [0; 2048];
+fn is_websocket(data: &str) -> bool {
+    data.contains("Upgrade: websocket") || 
+    data.contains("Sec-WebSocket-Key")
+}
+
+fn transfer(read: &mut TcpStream, write: &mut TcpStream, label: &str) -> io::Result<()> {
+    let mut buffer = [0u8; BUFFER_SIZE];
     loop {
-        match read_stream.read(&mut buffer) {
-            Ok(0) => break,
+        match read.read(&mut buffer) {
+            Ok(0) => break, // Conexão fechada
             Ok(n) => {
-                if write_stream.write_all(&buffer[..n]).is_err() {
-                    break;
-                }
+                write.write_all(&buffer[..n])?;
+                write.flush()?;
+                println!("{}: {} bytes transferidos", label, n);
             }
-            Err(_) => break,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
+            Err(e) => return Err(e),
         }
     }
-    write_stream.shutdown(Shutdown::Both).ok();
+    write.shutdown(Shutdown::Both)?;
+    Ok(())
 }
 
-fn get_port() -> u16 {
-    env::args().nth(1).and_then(|arg| arg.parse().ok()).unwrap_or(80)
+fn peek_stream(stream: &TcpStream) -> io::Result<String> {
+    let mut buffer = [0u8; 1024];
+    let n = stream.peek(&mut buffer)?;
+    Ok(String::from_utf8_lossy(&buffer[..n]).into_owned())
+}
+
+fn get_port() -> Option<u16> {
+    env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--port")
+        .and_then(|w| w[1].parse().ok())
+}
+
+fn get_status() -> String {
+    env::args()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--status")
+        .map(|w| w[1].clone())
+        .unwrap_or_else(|| "Server: RustProxy\r\nX-Status: Online".into())
 }
