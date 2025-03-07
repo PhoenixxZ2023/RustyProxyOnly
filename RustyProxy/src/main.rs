@@ -4,13 +4,14 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
 
+use threadpool::ThreadPool;
+
 const BUFFER_SIZE: usize = 8192;
 
 fn main() -> io::Result<()> {
     let port = get_port().unwrap_or(80);
     let status = get_status();
-    let timeout = get_timeout().unwrap_or(2);
-    let num_threads = num_cpus::get(); // Número de CPUs disponíveis
+    let num_threads = num_cpus::get();
     let pool = ThreadPool::new(num_threads);
 
     let listener = TcpListener::bind(("0.0.0.0", port))?;
@@ -21,7 +22,7 @@ fn main() -> io::Result<()> {
             Ok(stream) => {
                 let status = status.clone();
                 pool.execute(move || {
-                    if let Err(e) = handle_client(stream, &status, timeout) {
+                    if let Err(e) = handle_client(stream, &status) {
                         eprintln!("Erro na conexão: {}", e);
                     }
                 });
@@ -32,7 +33,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn handle_client(mut client: TcpStream, status: &str, timeout: u64) -> io::Result<()> {
+fn handle_client(mut client: TcpStream, status: &str) -> io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let client_clone = client.try_clone()?;
 
@@ -40,7 +41,7 @@ fn handle_client(mut client: TcpStream, status: &str, timeout: u64) -> io::Resul
         tx.send(peek_stream(&client_clone)).ok();
     });
 
-    let initial_data = match rx.recv_timeout(Duration::from_secs(timeout)) {
+    let initial_data = match rx.recv_timeout(Duration::from_secs(2)) {
         Ok(Ok(data)) => data,
         _ => String::new(),
     };
@@ -49,11 +50,7 @@ fn handle_client(mut client: TcpStream, status: &str, timeout: u64) -> io::Resul
         "0.0.0.0:22"
     } else if is_http(&initial_data) {
         handle_http(&mut client, status, &initial_data)?;
-        if is_websocket(&initial_data) {
-            "0.0.0.0:80"
-        } else {
-            "0.0.0.0:80"
-        }
+        "0.0.0.0:80"
     } else {
         "0.0.0.0:1194"
     };
@@ -84,29 +81,14 @@ fn handle_client(mut client: TcpStream, status: &str, timeout: u64) -> io::Resul
 
 fn handle_http(client: &mut TcpStream, status: &str, initial_data: &str) -> io::Result<()> {
     if initial_data.starts_with("GET") {
-        let response = if is_websocket(initial_data) {
-            if let Some(ws_key) = extract_websocket_key(initial_data) {
-                let accept_key = generate_websocket_accept_key(&ws_key);
-                format!(
-                    "HTTP/1.1 101 Switching Protocols\r\n\
-                    Upgrade: websocket\r\n\
-                    Connection: Upgrade\r\n\
-                    Sec-WebSocket-Accept: {}\r\n\r\n",
-                    accept_key
-                )
-            } else {
-                "HTTP/1.1 400 Bad Request\r\n\r\n".to_string()
-            }
-        } else {
-            format!(
-                "HTTP/1.1 200 OK\r\n\
-                Content-Length: {}\r\n\
-                Connection: close\r\n\r\n\
-                {}",
-                status.len(),
-                status
-            )
-        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+            Content-Length: {}\r\n\
+            Connection: close\r\n\r\n\
+            {}",
+            status.len(),
+            status
+        );
 
         client.write_all(response.as_bytes())?;
         client.flush()?;
@@ -117,22 +99,6 @@ fn handle_http(client: &mut TcpStream, status: &str, initial_data: &str) -> io::
 fn is_http(data: &str) -> bool {
     let http_methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT"];
     http_methods.iter().any(|method| data.starts_with(method)) || data.starts_with("HTTP/")
-}
-
-fn is_websocket(data: &str) -> bool {
-    data.contains("Upgrade: websocket") || data.contains("Sec-WebSocket-Key")
-}
-
-fn extract_websocket_key(data: &str) -> Option<String> {
-    data.lines()
-        .find(|line| line.starts_with("Sec-WebSocket-Key:"))
-        .map(|line| line.split(": ").nth(1).unwrap_or("").trim().to_string())
-}
-
-fn generate_websocket_accept_key(key: &str) -> String {
-    let magic_string = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
-    let hash = Sha1::digest(magic_string.as_bytes());
-    general_purpose::STANDARD.encode(hash)
 }
 
 fn transfer(read: &mut TcpStream, write: &mut TcpStream, label: &str) -> io::Result<()> {
@@ -174,12 +140,4 @@ fn get_status() -> String {
         .find(|w| w[0] == "--status")
         .map(|w| w[1].clone())
         .unwrap_or_else(|| "Server: RustProxy\r\nX-Status: Online".into())
-}
-
-fn get_timeout() -> Option<u64> {
-    env::args()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find(|w| w[0] == "--timeout")
-        .and_then(|w| w[1].parse().ok())
 }
