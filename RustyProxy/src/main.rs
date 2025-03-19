@@ -1,138 +1,103 @@
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{Error, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{env, thread};
-use log::{error, info};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Inicializa o logger
-    env_logger::init();
-    
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port()))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-    info!("Proxy iniciado na porta {}", get_port());
-    start_http(listener)?;
-    Ok(())
+fn main() {
+    let port = get_port();
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
+        .expect("Erro ao iniciar o servidor. Verifique se a porta está em uso.");
+
+    println!("Proxy rodando na porta {}", port);
+    start_http(listener);
 }
 
-/// Inicia o servidor proxy e aceita conexões
-fn start_http(listener: TcpListener) -> Result<(), Error> {
+fn start_http(listener: TcpListener) {
     for stream in listener.incoming() {
         match stream {
             Ok(mut client_stream) => {
-                info!("Nova conexão aceita de {:?}", client_stream.peer_addr());
                 thread::spawn(move || {
-                    if let Err(e) = handle_client(&mut client_stream) {
-                        error!("Erro ao tratar cliente: {}", e);
-                    }
+                    handle_client(&mut client_stream);
                 });
             }
-            Err(e) => error!("Erro ao aceitar conexão: {}", e),
+            Err(e) => {
+                eprintln!("Erro ao aceitar conexão: {}", e);
+            }
         }
     }
-    Ok(())
 }
 
-/// Trata uma conexão individual de cliente
-fn handle_client(client_stream: &mut TcpStream) -> Result<(), Error> {
-    client_stream.set_nodelay(true)?;
-    client_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
+fn handle_client(client_stream: &mut TcpStream) {
     let status = get_status();
-    client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())?;
+    if client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).is_err() {
+        return;
+    }
 
-    let data_str = peek_stream(client_stream)?;
-    
-    // Determina o destino baseado no protocolo
-    let target_addr = if data_str.contains("HTTP") {
-        if data_str.to_lowercase().contains("websocket") || data_str.to_lowercase().contains("ws") {
-            client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())?;
-            return Ok(()); // Para simplificar, não implementamos handshake WebSocket completo
-        }
-        "0.0.0.0:1194" // Assume OpenVPN como default para não-SSH
-    } else if data_str.contains("SSH") {
+    let data_str = match peek_stream(client_stream) {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+
+    let addr_proxy = if data_str.contains("SSH") {
         "0.0.0.0:22"
     } else {
         "0.0.0.0:1194"
     };
 
-    info!("Roteando para {}", target_addr);
-    let mut server_stream = TcpStream::connect(target_addr)?;
-    server_stream.set_nodelay(true)?;
-    server_stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    let server_connect = TcpStream::connect(addr_proxy);
+    let server_stream = match server_connect {
+        Ok(stream) => stream,
+        Err(_) => return,
+    };
 
-    // Clona streams para transferência bidirecional
-    let (mut client_read, mut client_write) = (client_stream.try_clone()?, client_stream.try_clone()?);
-    let (mut server_read, mut server_write) = (server_stream.try_clone()?, server_stream);
+    let client_read = client_stream.try_clone().unwrap();
+    let client_write = client_stream.try_clone().unwrap();
+    let server_read = server_stream.try_clone().unwrap();
+    let server_write = server_stream;
 
     thread::spawn(move || {
-        if let Err(e) = transfer_data(&mut client_read, &mut server_write) {
-            error!("Erro na transferência client->server: {}", e);
-        }
+        transfer_data(client_read, server_write);
     });
 
     thread::spawn(move || {
-        if let Err(e) = transfer_data(&mut server_read, &mut client_write) {
-            error!("Erro na transferência server->client: {}", e);
-        }
+        transfer_data(server_read, client_write);
     });
-
-    Ok(())
 }
 
-/// Transfere dados entre dois streams
-fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) -> Result<(), Error> {
+fn transfer_data(mut read_stream: TcpStream, mut write_stream: TcpStream) {
     let mut buffer = [0; 2048];
     loop {
         match read_stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => {
-                write_stream.write_all(&buffer[..n])?;
-                write_stream.flush()?;
+                if write_stream.write_all(&buffer[..n]).is_err() {
+                    break;
+                }
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => continue,
-            Err(e) => return Err(e),
+            Err(_) => break,
         }
     }
-    write_stream.shutdown(Shutdown::Both)?;
-    read_stream.shutdown(Shutdown::Both)?;
-    Ok(())
+    let _ = write_stream.shutdown(Shutdown::Both);
 }
 
-/// Faz peek nos dados do stream sem consumi-los
 fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
     let mut peek_buffer = vec![0; 1024];
     let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
-    if bytes_peeked > 1024 {
-        return Err(Error::new(ErrorKind::Other, "Payload muito grande"));
-    }
-    let data = &peek_buffer[..bytes_peeked];
-    Ok(String::from_utf8_lossy(data).to_string())
+    Ok(String::from_utf8_lossy(&peek_buffer[..bytes_peeked]).to_string())
 }
 
-/// Obtém a porta dos argumentos ou retorna default
 fn get_port() -> u16 {
-    let args: Vec<String> = env::args().collect();
-    let mut port = 80;
-
-    for i in 1..args.len() {
-        if args[i] == "--port" && i + 1 < args.len() {
-            port = args[i + 1].parse().unwrap_or(80);
-        }
-    }
-    port
+    env::args()
+        .skip_while(|arg| arg != "--port")
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(80)
 }
 
-/// Obtém o status dos argumentos ou retorna default
 fn get_status() -> String {
-    let args: Vec<String> = env::args().collect();
-    let mut status = String::from("@RustyManager");
-
-    for i in 1..args.len() {
-        if args[i] == "--status" && i + 1 < args.len() {
-            status = args[i + 1].clone();
-        }
-    }
-    status
+    env::args()
+        .skip_while(|arg| arg != "--status")
+        .nth(1)
+        .unwrap_or_else(|| "@RustyManager".to_string())
 }
