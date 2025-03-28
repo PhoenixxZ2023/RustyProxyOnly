@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use httparse;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -34,10 +33,10 @@ async fn start_proxy(listener: TcpListener) {
 async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result<(), Error> {
     let mut buffer = [0; 4096];
     let bytes_read = client_stream.read(&mut buffer).await?;
-    let request = &buffer[..bytes_read];
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
 
-    // Parsear a requisição com httparse
-    let (method, host, port, keep_alive) = match parse_http_request(request) {
+    // Parsear a requisição manualmente
+    let (method, host, port, keep_alive) = match parse_http_request(&request) {
         Ok((m, h, p, k)) => (m, h, p, k),
         Err(_) => {
             client_stream
@@ -79,7 +78,9 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
             client_stream
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await?;
-            server_stream.write_all(request).await?;
+            server_stream
+                .write_all(&buffer[..bytes_read])
+                .await?;
 
             let (tx_client_to_server, mut rx_client_to_server) = mpsc::channel::<Vec<u8>>(100);
             let (tx_server_to_client, mut rx_server_to_client) = mpsc::channel::<Vec<u8>>(100);
@@ -135,7 +136,9 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
             }
         }
         _ => {
-            server_stream.write_all(request).await?;
+            server_stream
+                .write_all(&buffer[..bytes_read])
+                .await?;
             let mut keep_alive = keep_alive;
 
             loop {
@@ -157,8 +160,8 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
                 if bytes_read == 0 {
                     break;
                 }
-                let next_request = &buffer[..bytes_read];
-                let (next_method, next_host, next_port, next_keep_alive) = match parse_http_request(next_request) {
+                let next_request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
+                let (next_method, next_host, next_port, next_keep_alive) = match parse_http_request(&next_request) {
                     Ok((m, h, p, k)) => (m, h, p, k),
                     Err(_) => break,
                 };
@@ -171,7 +174,9 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
                 if next_dest_addr != dest_addr {
                     server_stream = TcpStream::connect(&next_dest_addr).await?;
                 }
-                server_stream.write_all(next_request).await?;
+                server_stream
+                    .write_all(&buffer[..bytes_read])
+                    .await?;
                 keep_alive = next_keep_alive;
             }
         }
@@ -180,43 +185,42 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
     Ok(())
 }
 
-fn parse_http_request(request: &[u8]) -> Result<(String, Option<String>, Option<u16>, bool), ()> {
-    let mut headers = [httparse::EMPTY_HEADER; 16];
-    let mut req = httparse::Request::new(&mut headers);
-    if req.parse(request).is_err() {
+fn parse_http_request(request: &str) -> Result<(String, Option<String>, Option<u16>, bool), ()> {
+    let lines: Vec<&str> = request.lines().collect();
+    if lines.is_empty() {
         return Err(());
     }
 
-    let method = req.method.unwrap_or("").to_string();
+    // Parsear a primeira linha (método e URI)
+    let first_line_parts: Vec<&str> = lines[0].split_whitespace().collect();
+    if first_line_parts.len() < 2 {
+        return Err(());
+    }
+    let method = first_line_parts[0].to_string();
+
     let mut host = None;
     let mut port = None;
     let mut keep_alive = false;
 
-    for header in req.headers {
-        match header.name.to_lowercase().as_str() {
-            "host" => {
-                let host_value = std::str::from_utf8(header.value).unwrap_or("");
-                let parts: Vec<&str> = host_value.split(':').collect();
-                host = Some(parts[0].to_string());
-                if parts.len() > 1 {
-                    port = parts[1].parse().ok();
-                }
+    // Procurar cabeçalho Host e Connection
+    for line in lines.iter().skip(1) {
+        if line.to_lowercase().starts_with("host:") {
+            let host_value = line[5..].trim();
+            let parts: Vec<&str> = host_value.split(':').collect();
+            host = Some(parts[0].to_string());
+            if parts.len() > 1 {
+                port = parts[1].parse().ok();
             }
-            "connection" => {
-                if std::str::from_utf8(header.value)
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains("keep-alive")
-                {
-                    keep_alive = true;
-                }
+        } else if line.to_lowercase().starts_with("connection:") {
+            if line[10..].trim().to_lowercase().contains("keep-alive") {
+                keep_alive = true;
             }
-            _ => {}
         }
     }
 
-    if method == "CONNECT" && req.path.is_some() {
-        let target = req.path.unwrap();
+    // Para CONNECT, o destino está na primeira linha
+    if method == "CONNECT" {
+        let target = first_line_parts[1];
         let parts: Vec<&str> = target.split(':').collect();
         host = Some(parts[0].to_string());
         if parts.len() > 1 {
