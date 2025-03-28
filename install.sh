@@ -99,7 +99,7 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     fi
 
 
-    git clone --branch "main" https://github.com/WorldSsh/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar rustyproxy"
+    git clone --branch "main" https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar rustyproxy"
     mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu
     cd /root/RustyProxyOnly/RustyProxy
     cargo build --release --jobs $(nproc) > /dev/null 2>&1 || error_exit "Falha ao compilar rustyproxy"
