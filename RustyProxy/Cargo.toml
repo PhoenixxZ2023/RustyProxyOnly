@@ -4,6 +4,3 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
-httparse = "1.8"
-tokio-rustls = "0.26"
-rustls-pemfile = "2.1"
