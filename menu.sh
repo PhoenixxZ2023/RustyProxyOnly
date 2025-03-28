@@ -110,7 +110,7 @@ uninstall_rustyproxy() {
     sudo rm -f "$PORTS_FILE"
 
     echo -e "\033[0;36m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m"
-    echo -e "\033[1;36m┃\E[44;1;37m        RUSTY PROXY DESINSTALADO COM SUCESSO.    \E[0m\033[0;36m┃"
+    echo -e "\033[1;36m┃\E[44;1;37mRUSTY PROXY DESINSTALADO COM SUCESSO.    \E[0m\033[0;36m┃"
     echo -e "\033[0;36m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
     sleep 4
     clear
