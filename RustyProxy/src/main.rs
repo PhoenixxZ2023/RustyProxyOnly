@@ -37,7 +37,7 @@ async fn handle_client(mut client_stream: TcpStream, addr: SocketAddr) -> Result
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 8192];
     let bytes_read = client_stream.read(&mut buffer).await?;
 
     let initial_data = buffer[..bytes_read].to_vec();
