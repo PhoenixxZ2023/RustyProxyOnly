@@ -92,6 +92,30 @@ del_proxy_port() {
     echo -e "${GREEN}${BOLD}PORTA $port FECHADA COM SUCESSO.${RESET}"
 }
 
+# Função para desinstalar o RustyProxy
+uninstall_rustyproxy() {
+    echo "DESINSTALANDO RUSTY PROXY, AGUARDE..."
+    sleep 4
+    clear
+
+# Parar e remover todos os serviços
+    if [ -s "$PORTS_FILE" ]; then
+        while read -r port; do
+            del_proxy_port $port
+        done < "$PORTS_FILE"
+    fi
+	
+	# Remover binário, arquivos e diretórios
+    sudo rm -rf /opt/rustyproxy
+    sudo rm -f "$PORTS_FILE"
+
+    echo -e "\033[0;36m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m"
+    echo -e "\033[1;36m┃\E[44;1;37m        RUSTY PROXY DESINSTALADO COM SUCESSO.    \E[0m\033[0;36m┃"
+    echo -e "\033[0;36m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
+    sleep 4
+    clear
+}
+
 # Função para exibir o menu formatado
 show_menu() {
     clear
@@ -110,6 +134,7 @@ show_menu() {
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m01\033[1;31m] \033[1;37m• \033[1;33mABRIR PORTA                     \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m02\033[1;31m] \033[1;37m• \033[1;33mFECHAR PORTA                    \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m02\033[1;31m] \033[1;37m• \033[1;33mDESINTALAR PROXY                \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m00\033[1;31m] \033[1;37m• \033[1;33mSAIR DO MENU                    \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
@@ -135,6 +160,13 @@ show_menu() {
             del_proxy_port $port
             read -p "━➤ PORTA DESATIVADA COM SUCESSO. PRESSIONE QUALQUER TECLA." dummy
             ;;
+        3)
+            clear
+            uninstall_rustyproxy
+            read -p "◉ PRESSIONE QUALQUER TECLA PARA SAIR." dummy
+	        clear
+            exit 0
+            ;;		
         0)
             exit 0
             ;;
