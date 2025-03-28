@@ -1,151 +1,111 @@
-use std::io::{Error, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
-use std::sync::mpsc;
-use std::time::Duration;
-use std::{env, thread};
+use std::env;
+use std::io::Error;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
 
-fn main() {
-    // Iniciando o proxy
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", get_port())).unwrap();
-    start_http(listener);
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let port = get_port();
+    let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
+    println!("Servidor iniciado na porta: {}", port);
+    start_proxy(listener).await;
+    Ok(())
 }
 
-fn start_http(listener: TcpListener) {
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut client_stream) => {
-                thread::spawn(move || {
-                    handle_client(&mut client_stream);
+async fn start_proxy(listener: TcpListener) {
+    loop {
+        match listener.accept().await {
+            Ok((client_stream, addr)) => {
+                println!("Nova conexão de: {}", addr);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(client_stream).await {
+                        eprintln!("Erro ao processar cliente {}: {}", addr, e);
+                    }
                 });
             }
-            Err(e) => {
-                eprintln!("Error accepting connection: {}", e);
-            }
+            Err(e) => eprintln!("Erro ao aceitar conexão: {}", e),
         }
     }
 }
 
-fn handle_client(client_stream: &mut TcpStream) {
+async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
-    
-    // Envia resposta inicial HTTP 101 Switching Protocols
-    if client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).is_err() {
-        return;
-    }
+    client_stream
+        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
-    // Identifica se é um proxy HTTP
-    match peek_stream(&client_stream) {
-        Ok(data_str) => {
-            let payload_str = data_str.to_lowercase();
+    let mut buffer = [0; 1024];
+    client_stream.read(&mut buffer).await?;
+    client_stream
+        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
-            if payload_str.contains("connect ") || payload_str.contains("get http://") {
-                println!("🚨 Conexão Proxy HTTP detectada!");
-                let _ = client_stream.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n");
-                return;
-            }
+    let addr_proxy = match timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await {
+        Ok(Ok(data)) if data.contains("SSH") || data.is_empty() => "0.0.0.0:22",
+        Ok(_) => "0.0.0.0:1194",
+        Err(_) => "0.0.0.0:22",
+    };
 
-            // Identifica tráfego HTTP/WebSocket
-            if payload_str.contains("http") {
-                let _ = client_stream.read(&mut vec![0; 1024]);
-                if payload_str.contains("websocket") || payload_str.contains("ws") {
-                    let _ = client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes());
-                    return;
-                }
-            }
+    let server_stream = match TcpStream::connect(addr_proxy).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            eprintln!("Erro ao conectar-se ao servidor proxy em {}", addr_proxy);
+            return Ok(());
         }
-        Err(..) => return,
-    }
+    };
 
-    // Define a porta do proxy conforme o tipo de tráfego
-    let mut addr_proxy = "0.0.0.0:22";
+    let (client_read, client_write) = client_stream.into_split();
+    let (server_read, server_write) = server_stream.into_split();
 
-    let (tx, rx) = mpsc::channel();
-    let clone_client = client_stream.try_clone().unwrap();
-    let read_handle = thread::spawn(move || {
-        let result = peek_stream(&clone_client);
-        tx.send(result).ok();
-    });
+    let client_read = Arc::new(Mutex::new(client_read));
+    let client_write = Arc::new(Mutex::new(client_write));
+    let server_read = Arc::new(Mutex::new(server_read));
+    let server_write = Arc::new(Mutex::new(server_write));
 
-    let read_result = rx.recv_timeout(Duration::from_secs(1));
-    match read_result {
-        Ok(Ok(data_str)) => {
-            if !data_str.contains("SSH") {
-                addr_proxy = "0.0.0.0:1194";
-            }
-        }
-        _ => {}
-    }
+    tokio::try_join!(
+        transfer_data(client_read.clone(), server_write.clone()),
+        transfer_data(server_read.clone(), client_write.clone())
+    )?;
 
-    // Tenta conectar ao servidor correto
-    let server_connect = TcpStream::connect(&addr_proxy);
-    if server_connect.is_err() {
-        return;
-    }
-
-    let server_stream = server_connect.unwrap();
-
-    let (mut client_read, mut client_write) = (client_stream.try_clone().unwrap(), client_stream.try_clone().unwrap());
-    let (mut server_read, mut server_write) = (server_stream.try_clone().unwrap(), server_stream);
-
-    thread::spawn(move || {
-        transfer_data(&mut client_read, &mut server_write);
-    });
-
-    thread::spawn(move || {
-        transfer_data(&mut server_read, &mut client_write);
-    });
+    Ok(())
 }
 
-fn transfer_data(read_stream: &mut TcpStream, write_stream: &mut TcpStream) {
-    let mut buffer = [0; 2048];
+async fn transfer_data(
+    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+) -> Result<(), Error> {
+    let mut buffer = [0; 8192];
     loop {
-        match read_stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(n) => {
-                if write_stream.write_all(&buffer[..n]).is_err() {
-                    break;
-                }
+        let bytes_read = {
+            let mut reader = read_stream.lock().await;
+            match reader.read(&mut buffer).await {
+                Ok(0) => break, 
+                Ok(n) => n,
+                Err(_) => break,
             }
-            Err(_) => break,
+        };
+
+        let mut writer = write_stream.lock().await;
+        if writer.write_all(&buffer[..bytes_read]).await.is_err() {
+            break;
         }
     }
-    write_stream.shutdown(Shutdown::Both).ok();
+    Ok(())
 }
 
-fn peek_stream(read_stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 1024];
-    let bytes_peeked = read_stream.peek(&mut peek_buffer)?;
-    let data = &peek_buffer[..bytes_peeked];
-    let data_str = String::from_utf8_lossy(data);
-    Ok(data_str.to_string())
+async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+    let mut buffer = vec![0; 8192];
+    let bytes_peeked = stream.peek(&mut buffer).await?;
+    Ok(String::from_utf8_lossy(&buffer[..bytes_peeked]).to_string())
 }
 
 fn get_port() -> u16 {
-    let args: Vec<String> = env::args().collect();
-    let mut port = 80;
-
-    for i in 1..args.len() {
-        if args[i] == "--port" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(80);
-            }
-        }
-    }
-
-    port
+    env::args().nth(2).unwrap_or_else(|| "80".to_string()).parse().unwrap_or(80)
 }
 
 fn get_status() -> String {
-    let args: Vec<String> = env::args().collect();
-    let mut status = String::from("@RustyManager");
-
-    for i in 1..args.len() {
-        if args[i] == "--status" {
-            if i + 1 < args.len() {
-                status = args[i + 1].clone();
-            }
-        }
-    }
-
-    status
+    env::args().nth(4).unwrap_or_else(|| "@RustyManager".to_string())
 }
