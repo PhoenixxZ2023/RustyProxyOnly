@@ -16,17 +16,16 @@ async fn main() -> Result<(), Error> {
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Spawn da lógica do proxy
     tokio::spawn(async move {
         start_proxy(listener, shutdown_rx).await;
     });
 
-    // Escuta por Ctrl+C para encerramento
     signal::ctrl_c().await?;
     println!("Recebido sinal de encerramento, finalizando...");
-    shutdown_tx.send(()).expect("Falha ao enviar sinal de shutdown");
+    if shutdown_tx.send(()).is_err() {
+        eprintln!("Aviso: O canal de encerramento já foi fechado.");
+    }
 
-    // Aguarda um tempo para conexões terminarem
     tokio::time::sleep(Duration::from_secs(5)).await;
     Ok(())
 }
@@ -69,14 +68,14 @@ impl ProxyConfig {
     }
 
     fn get_destination(&self, data: &str) -> &str {
-        if data.contains("SSH") {
+        if data.starts_with("SSH") || data.contains("ssh") {
             self.protocol_map.get("SSH").unwrap()
-        } else if data.starts_with("GET") || data.starts_with("POST") {
+        } else if data.starts_with("GET") || data.starts_with("POST") || data.contains("HTTP") {
             self.protocol_map.get("HTTP").unwrap()
-        } else if data.is_empty() || data.contains("OpenVPN") {
+        } else if data.contains("OpenVPN") {
             self.protocol_map.get("OpenVPN").unwrap()
         } else {
-            self.protocol_map.get("SSH").unwrap() // Default
+            self.protocol_map.get("SSH").unwrap()
         }
     }
 }
@@ -125,16 +124,16 @@ async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 ) -> Result<(), Error> {
-    let mut buffer = Vec::with_capacity(8192); // Buffer dinâmico com capacidade inicial
+    let mut buffer = Vec::with_capacity(8192);
     loop {
-        buffer.clear(); // Reutiliza o buffer
+        buffer.clear();
         let bytes_read = {
             let mut reader = read_stream.lock().await;
-            reader.read_buf(&mut buffer).await? // Usa read_buf para buffer dinâmico
+            reader.read_buf(&mut buffer).await?
         };
 
         if bytes_read == 0 {
-            break; // Conexão fechada
+            break;
         }
 
         let mut writer = write_stream.lock().await;
@@ -145,13 +144,19 @@ async fn transfer_data(
 
 async fn peek_stream(stream: &TcpStream, timeout_secs: u64) -> Result<String, Error> {
     let mut buffer = vec![0; 8192];
-    let bytes_peeked = timeout(Duration::from_secs(timeout_secs), stream.peek(&mut buffer)).await??;
-    Ok(String::from_utf8_lossy(&buffer[..bytes_peeked]).to_string())
+    match timeout(Duration::from_secs(timeout_secs), stream.peek(&mut buffer)).await {
+        Ok(Ok(bytes_peeked)) => Ok(String::from_utf8_lossy(&buffer[..bytes_peeked]).to_string()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => {
+            eprintln!("Tempo limite atingido para leitura inicial.");
+            Ok("".to_string())
+        }
+    }
 }
 
 fn get_port() -> u16 {
     env::args()
-        .nth(2)
+        .nth(1)
         .unwrap_or_else(|| "80".to_string())
         .parse()
         .unwrap_or(80)
@@ -159,6 +164,6 @@ fn get_port() -> u16 {
 
 fn get_status() -> String {
     env::args()
-        .nth(4)
+        .nth(2)
         .unwrap_or_else(|| "@RustyManager".to_string())
 }
