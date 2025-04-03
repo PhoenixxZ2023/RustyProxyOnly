@@ -1,7 +1,6 @@
+[package]
+name = "RustyProxy"
+edition = "2021"
+
 [dependencies]
-tokio = { version = "1.32", features = ["full"] }
-httparse = "1.8"
-tokio-rustls = "0.23"
-rustls = "0.20"
-tokio-tungstenite = "0.17"
-webpki-roots = "0.22" # Para carregar certificados raiz confiáveis
+tokio = { version = "1.37", features = ["full"] }
