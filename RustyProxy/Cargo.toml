@@ -4,4 +4,3 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
-deadpool = "0.9"
