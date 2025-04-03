@@ -6,14 +6,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
-// Constantes para tamanhos de buffer
-const BUFFER_SIZE: usize = 8192; // Tamanho do buffer para transferência de dados
-const PEEK_BUFFER_SIZE: usize = 8192; // Tamanho do buffer para espiar o stream
-const INITIAL_BUFFER_SIZE: usize = 1024; // Tamanho inicial do buffer do cliente
+const BUFFER_SIZE: usize = 8192;
+const PEEK_BUFFER_SIZE: usize = 8192;
+const INITIAL_BUFFER_SIZE: usize = 1024;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Iniciando o proxy
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Iniciando serviço na porta: {}", port);
@@ -31,9 +29,7 @@ async fn start_http(listener: TcpListener) {
                     }
                 });
             }
-            Err(e) => {
-                println!("Erro ao aceitar conexão: {}", e);
-            }
+            Err(e) => println!("Erro ao aceitar conexão: {}", e),
         }
     }
 }
@@ -45,27 +41,38 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         .await?;
 
     let mut buffer = vec![0; INITIAL_BUFFER_SIZE];
-    client_stream.read(&mut buffer).await?;
-    client_stream
-        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
-        .await?;
+    let bytes_read = client_stream.read(&mut buffer).await?;
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
 
     let mut addr_proxy = "0.0.0.0:22"; // Padrão: SSH
-    let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream))
-        .await
-        .unwrap_or_else(|_| Ok(String::new()));
-
-    if let Ok(data) = result {
-        if is_ssh_protocol(&data) {
-            addr_proxy = "0.0.0.0:22"; // SSH
-        } else if is_http_protocol(&data) {
-            addr_proxy = "0.0.0.0:80"; // HTTP
+    if request.starts_with("CONNECT ") {
+        let parts: Vec<&str> = request.split_whitespace().collect();
+        if parts.len() >= 2 {
+            addr_proxy = parts[1];
+            client_stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await?;
         } else {
-            addr_proxy = "0.0.0.0:1194"; // Outros (assumido como OpenVPN)
+            client_stream
+                .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+                .await?;
+            return Ok(());
+        }
+    } else {
+        let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream))
+            .await
+            .unwrap_or_else(|_| Ok(String::new()));
+        if let Ok(data) = result {
+            if is_ssh_protocol(&data) {
+                addr_proxy = "0.0.0.0:22";
+            } else if is_http_protocol(&data) {
+                addr_proxy = "0.0.0.0:80";
+            } else {
+                addr_proxy = "0.0.0.0:1194";
+            }
         }
     }
 
-    // Propagação de erro com mensagem detalhada
     let server_stream = TcpStream::connect(addr_proxy)
         .await
         .map_err(|e| {
@@ -99,15 +106,12 @@ async fn transfer_data(
             let mut read_guard = read_stream.lock().await;
             read_guard.read(&mut buffer).await?
         };
-
         if bytes_read == 0 {
             break;
         }
-
         let mut write_guard = write_stream.lock().await;
         write_guard.write_all(&buffer[..bytes_read]).await?;
     }
-
     Ok(())
 }
 
@@ -119,15 +123,11 @@ async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     Ok(data_str.to_string())
 }
 
-// Função para verificar se é um protocolo SSH
 fn is_ssh_protocol(data: &str) -> bool {
-    // SSH começa com "SSH-" seguido por versão (ex.: "SSH-2.0-OpenSSH_8.1")
     data.starts_with("SSH-") && data.len() > 4 && data.chars().nth(4).unwrap_or(' ') != ' '
 }
 
-// Função para verificar se é um protocolo HTTP
 fn is_http_protocol(data: &str) -> bool {
-    // Verifica métodos HTTP comuns no início da requisição
     data.starts_with("GET ") || 
     data.starts_with("POST ") || 
     data.starts_with("HEAD ") || 
@@ -137,16 +137,9 @@ fn is_http_protocol(data: &str) -> bool {
     data.starts_with("PATCH ")
 }
 
-// Função para verificar se é um protocolo OpenVPN (heurística simples)
-fn is_openvpn_protocol(data: &str) -> bool {
-    // Mantida como heurística básica, mas agora menos relevante
-    data.len() > 0 && !data.starts_with("SSH-") && data.chars().all(|c| c.is_ascii())
-}
-
 fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
     let mut port = 80;
-
     for i in 1..args.len() {
         if args[i] == "--port" {
             if i + 1 < args.len() {
@@ -154,14 +147,12 @@ fn get_port() -> u16 {
             }
         }
     }
-
     port
 }
 
 fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
     let mut status = String::from("@RustyManager");
-
     for i in 1..args.len() {
         if args[i] == "--status" {
             if i + 1 < args.len() {
@@ -169,6 +160,5 @@ fn get_status() -> String {
             }
         }
     }
-
     status
 }
