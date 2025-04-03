@@ -4,14 +4,12 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
-
-const BUFFER_SIZE: usize = 8192;
-const PEEK_BUFFER_SIZE: usize = 8192;
-const INITIAL_BUFFER_SIZE: usize = 1024;
+use tokio::{time::{Duration}};
+use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
+    // Iniciando o proxy
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Iniciando serviço na porta: {}", port);
@@ -29,7 +27,9 @@ async fn start_http(listener: TcpListener) {
                     }
                 });
             }
-            Err(e) => println!("Erro ao aceitar conexão: {}", e),
+            Err(e) => {
+                println!("Erro ao aceitar conexão: {}", e);
+            }
         }
     }
 }
@@ -40,45 +40,35 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    let mut buffer = vec![0; INITIAL_BUFFER_SIZE];
-    let bytes_read = client_stream.read(&mut buffer).await?;
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let mut buffer = vec![0; 1024];
+    client_stream.read(&mut buffer).await?;
+    client_stream
+        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
-    let mut addr_proxy = "0.0.0.0:22"; // Padrão: SSH
-    if request.starts_with("CONNECT ") {
-        let parts: Vec<&str> = request.split_whitespace().collect();
-        if parts.len() >= 2 {
-            addr_proxy = parts[1];
-            client_stream
-                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                .await?;
+    let mut addr_proxy = "0.0.0.0:22";
+    let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
+        .unwrap_or_else(|_| Ok(String::new()));
+
+    if let Ok(data) = result {
+        if data.contains("SSH") || data.is_empty() {
+            addr_proxy = "0.0.0.0:22";
         } else {
-            client_stream
-                .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-                .await?;
-            return Ok(());
+            addr_proxy = "0.0.0.0:1194";
         }
     } else {
-        let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream))
-            .await
-            .unwrap_or_else(|_| Ok(String::new()));
-        if let Ok(data) = result {
-            if is_ssh_protocol(&data) {
-                addr_proxy = "0.0.0.0:22";
-            } else if is_http_protocol(&data) {
-                addr_proxy = "0.0.0.0:80";
-            } else {
-                addr_proxy = "0.0.0.0:1194";
-            }
-        }
+        addr_proxy = "0.0.0.0:22";
     }
 
-    let server_stream = TcpStream::connect(addr_proxy)
-        .await
-        .map_err(|e| {
-            println!("Erro ao iniciar conexão para o proxy {}: {}", addr_proxy, e);
-            e
-        })?;
+    let server_connect = TcpStream::connect(addr_proxy).await;
+    if server_connect.is_err() {
+        println!("erro ao iniciar conexão para o proxy ");
+        return Ok(());
+    }
+
+
+
+    let server_stream = server_connect?;
 
     let (client_read, client_write) = client_stream.into_split();
     let (server_read, server_write) = server_stream.into_split();
@@ -100,46 +90,37 @@ async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 ) -> Result<(), Error> {
-    let mut buffer = [0; BUFFER_SIZE];
+    let mut buffer = [0; 8192];
     loop {
         let bytes_read = {
             let mut read_guard = read_stream.lock().await;
             read_guard.read(&mut buffer).await?
         };
+
         if bytes_read == 0 {
             break;
         }
+
         let mut write_guard = write_stream.lock().await;
         write_guard.write_all(&buffer[..bytes_read]).await?;
     }
+
     Ok(())
 }
 
 async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; PEEK_BUFFER_SIZE];
+    let mut peek_buffer = vec![0; 8192];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
     Ok(data_str.to_string())
 }
 
-fn is_ssh_protocol(data: &str) -> bool {
-    data.starts_with("SSH-") && data.len() > 4 && data.chars().nth(4).unwrap_or(' ') != ' '
-}
-
-fn is_http_protocol(data: &str) -> bool {
-    data.starts_with("GET ") || 
-    data.starts_with("POST ") || 
-    data.starts_with("HEAD ") || 
-    data.starts_with("PUT ") || 
-    data.starts_with("DELETE ") || 
-    data.starts_with("OPTIONS ") || 
-    data.starts_with("PATCH ")
-}
 
 fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
     let mut port = 80;
+
     for i in 1..args.len() {
         if args[i] == "--port" {
             if i + 1 < args.len() {
@@ -147,12 +128,14 @@ fn get_port() -> u16 {
             }
         }
     }
+
     port
 }
 
 fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
     let mut status = String::from("@RustyManager");
+
     for i in 1..args.len() {
         if args[i] == "--status" {
             if i + 1 < args.len() {
@@ -160,5 +143,6 @@ fn get_status() -> String {
             }
         }
     }
+
     status
 }
