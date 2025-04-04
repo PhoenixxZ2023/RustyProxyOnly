@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-use tokio::time::{Duration, timeout};
+use tokio::{time::{Duration}};
+use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -12,11 +13,11 @@ async fn main() -> Result<(), Error> {
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Iniciando serviço na porta: {}", port);
-    start_proxy(listener).await;
+    start_http(listener).await;
     Ok(())
 }
 
-async fn start_proxy(listener: TcpListener) {
+async fn start_http(listener: TcpListener) {
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
@@ -34,40 +35,41 @@ async fn start_proxy(listener: TcpListener) {
 }
 
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    // Resposta inicial simples para compatibilidade com HTTP/WebSocket
     let status = get_status();
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    // Buffer para inspecionar os dados iniciais
     let mut buffer = vec![0; 1024];
+    client_stream.read(&mut buffer).await?;
+    client_stream
+        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+        .await?;
+
+    let mut addr_proxy = "0.0.0.0:22";
     let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
         .unwrap_or_else(|_| Ok(String::new()));
 
-    // Escolher o destino com base nos dados iniciais
-    let addr_proxy = match result {
-        Ok(data) => {
-            if data.contains("SSH") || data.is_empty() {
-                "0.0.0.0:22" // SSH
-            } else if data.starts_with("GET") || data.starts_with("POST") || data.contains("HTTP") {
-                "0.0.0.0:80" // HTTP
-            } else if data.starts_with("\x16") {
-                "0.0.0.0:443" // TLS/HTTPS
-            } else if data.contains("Upgrade: websocket") {
-                "0.0.0.0:80" // WebSocket (assumindo porta padrão)
-            } else {
-                "0.0.0.0:1194" // Padrão (ex.: VPN)
-            }
+    if let Ok(data) = result {
+        if data.contains("SSH") || data.is_empty() {
+            addr_proxy = "0.0.0.0:22";
+        } else {
+            addr_proxy = "0.0.0.0:1194";
         }
-        Err(_) => "0.0.0.0:22", // Default para SSH em caso de erro
-    };
+    } else {
+        addr_proxy = "0.0.0.0:22";
+    }
 
-    // Conectar ao servidor de destino
-    let server_stream = TcpStream::connect(addr_proxy).await?;
-    println!("Encaminhando para: {}", addr_proxy);
+    let server_connect = TcpStream::connect(addr_proxy).await;
+    if server_connect.is_err() {
+        println!("erro ao iniciar conexão para o proxy ");
+        return Ok(());
+    }
 
-    // Dividir streams para encaminhamento bidirecional
+
+
+    let server_stream = server_connect?;
+
     let (client_read, client_write) = client_stream.into_split();
     let (server_read, server_write) = server_stream.into_split();
 
@@ -106,13 +108,14 @@ async fn transfer_data(
     Ok(())
 }
 
-async fn peek_stream(stream: &mut TcpStream) -> Result<String, Error> {
+async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     let mut peek_buffer = vec![0; 8192];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
     Ok(data_str.to_string())
 }
+
 
 fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
@@ -142,4 +145,4 @@ fn get_status() -> String {
     }
 
     status
-} 
+}
