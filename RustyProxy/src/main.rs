@@ -58,7 +58,6 @@ impl Config {
 enum Protocolo {
     SSH,
     OpenVPN,
-    HTTP,          // Adicionado para suportar HTTP
     Desconhecido,
 }
 
@@ -107,7 +106,6 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let addr_proxy = match timeout(Duration::from_secs(1), detectar_protocolo(&client_stream)).await {
         Ok(Protocolo::SSH) => format!("0.0.0.0:{}", config.ssh_port),
         Ok(Protocolo::OpenVPN) => format!("0.0.0.0:{}", config.openvpn_port),
-        Ok(Protocolo::HTTP) => format!("0.0.0.0:{}", config.listen_port), // HTTP usa a porta de escuta como fallback
         Ok(Protocolo::Desconhecido) | Err(_) => {
             println!("Protocolo desconhecido ou timeout, usando SSH como fallback");
             format!("0.0.0.0:{}", config.ssh_port)
@@ -118,9 +116,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let server_stream = TcpStream::connect(&addr_proxy).await
         .map_err(|e| {
             println!("Erro ao conectar ao {} na porta {}: {}", 
-                if addr_proxy.contains(&config.ssh_port.to_string()) { "SSH" } 
-                else if addr_proxy.contains(&config.openvpn_port.to_string()) { "OpenVPN" } 
-                else { "HTTP" }, 
+                if addr_proxy.contains(&config.ssh_port.to_string()) { "SSH" } else { "OpenVPN" }, 
                 addr_proxy, 
                 e);
             e
@@ -146,7 +142,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
 async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
-    write_stream: Arc::Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 ) -> Result<(), Error> {
     let mut buffer = [0; 8192];
     loop {
@@ -170,23 +166,10 @@ async fn transfer_data(
 async fn detectar_protocolo(stream: &TcpStream) -> Protocolo {
     match peek_stream(stream).await {
         Ok(data) => {
-            if data.starts_with("SSH-") {
+            if data.starts_with("SSH-") { // Verificação específica para SSH
                 Protocolo::SSH
-            } else if data.contains(&[0x05, 0x01, 0x00]) { // Verificação mais específica para OpenVPN
+            } else if !data.is_empty() { // Assume OpenVPN se não for SSH e houver dados
                 Protocolo::OpenVPN
-            } else if data.starts_with("GET ") || 
-                      data.starts_with("ACL ") || 
-                      data.starts_with("PATCH ") || 
-                      data.starts_with("PROPPATCH ") || 
-                      data.starts_with("PROPFIND ") || 
-                      data.starts_with("MOVE ") || 
-                      data.starts_with("LOCK ") || 
-                      data.starts_with("MKCOL ") || 
-                      data.starts_with("UNLOCK ") || 
-                      data.starts_with("MERGE ") || 
-                      data.starts_with("COPY ") || 
-                      data.starts_with("ORDERPATCH ") {
-                Protocolo::HTTP
             } else {
                 Protocolo::Desconhecido
             }
@@ -204,4 +187,4 @@ async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
     Ok(data_str.to_string())
-} 
+}
