@@ -6,24 +6,23 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
+// Estrutura para centralizar configurações (sem alterações)
 struct Config {
     listen_port: u16,
     ssh_port: u16,
     openvpn_port: u16,
     http_port: u16,
-    http_host: String,  // Novo campo para o host de destino HTTP
     status: String,
 }
 
 impl Config {
     fn from_args() -> Self {
-        let args: Vec<String> = env::args().collect wording();
+        let args: Vec<String> = env::args().collect();
         let mut config = Config {
-            listen_port: 80,        // Proxy escuta na porta 80
+            listen_port: 80,
             ssh_port: 22,
             openvpn_port: 1194,
-            http_port: 80,         // HTTP encaminhado para porta 80
-            http_host: String::from("127.0.0.1"),  // Host padrão para HTTP
+            http_port: 8080,
             status: String::from("@RustyManager"),
         };
 
@@ -46,12 +45,7 @@ impl Config {
                 }
                 "--http-port" => {
                     if i + 1 < args.len() {
-                        config.http_port = args[i + 1].parse().unwrap_or(80);
-                    }
-                }
-                "--http-host" => {  // Nova flag para o host HTTP
-                    if i + 1 < args.len() {
-                        config.http_host = args[i + 1].clone();
+                        config.http_port = args[i + 1].parse().unwrap_or(8080);
                     }
                 }
                 "--status" => {
@@ -62,12 +56,6 @@ impl Config {
                 _ => {}
             }
         }
-
-        // Verificação para evitar loop
-        if config.listen_port == config.http_port && config.http_host == "[::]" {
-            println!("AVISO: listen_port e http_port são iguais e http_host é [::]. Isso pode causar um loop. Use --http-host para especificar um destino diferente.");
-        }
-
         config
     }
 }
@@ -119,7 +107,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let addr_proxy = match timeout(Duration::from_secs(1), detectar_protocolo(&client_stream)).await {
         Ok(Protocolo::SSH) => format!("0.0.0.0:{}", config.ssh_port),
         Ok(Protocolo::OpenVPN) => format!("0.0.0.0:{}", config.openvpn_port),
-        Ok(Protocolo::HTTP) => format!("{}:{}", config.http_host, config.http_port),  // Usa http_host
+        Ok(Protocolo::HTTP) => format!("0.0.0.0:{}", config.http_port),
         Ok(Protocolo::Desconhecido) | Err(_) => {
             println!("Protocolo desconhecido ou timeout, usando SSH como fallback");
             format!("0.0.0.0:{}", config.ssh_port)
@@ -166,6 +154,7 @@ async fn transfer_data(
     Ok(())
 }
 
+// Função atualizada com todos os métodos HTTP
 async fn detectar_protocolo(stream: &TcpStream) -> Protocolo {
     match peek_stream(stream).await {
         Ok(data) => {
@@ -185,7 +174,7 @@ async fn detectar_protocolo(stream: &TcpStream) -> Protocolo {
                       data.starts_with("MERGE ") ||
                       data.starts_with("COPY ") ||
                       data.starts_with("ORDERPATCH ") {
-                Protocolo::HTTP
+                Protocolo::HTTP  // Identifica todos os métodos HTTP listados
             } else if !data.is_empty() {
                 Protocolo::OpenVPN
             } else {
