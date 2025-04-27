@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 use tracing::{error, info};
 use tokio::signal;
+use deadpool::managed::{self, Manager, Pool};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -15,23 +16,30 @@ async fn main() -> Result<(), Error> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
+    // Inicializando pools de conexões
+    let (ssh_proxy_addr, openvpn_proxy_addr) = get_proxy_addresses();
+    let ssh_pool = create_tcp_pool(ssh_proxy_addr.clone(), 10).await?;
+    let openvpn_pool = create_tcp_pool(openvpn_proxy_addr.clone(), 10).await?;
+
     // Iniciando o proxy
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     info!("Iniciando serviço na porta: {}", port);
-    start_http(listener).await;
+    start_http(listener, ssh_pool, openvpn_pool).await;
     Ok(())
 }
 
-async fn start_http(listener: TcpListener) {
+async fn start_http(listener: TcpListener, ssh_pool: TcpPool, openvpn_pool: TcpPool) {
     let mut sig = signal::ctrl_c();
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok((client_stream, addr)) => {
+                        let ssh_pool = ssh_pool.clone();
+                        let openvpn_pool = openvpn_pool.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client(client_stream).await {
+                            if let Err(e) = handle_client(client_stream, ssh_pool, openvpn_pool).await {
                                 error!("Erro ao processar cliente {}: {}", addr, e);
                             }
                         });
@@ -47,7 +55,42 @@ async fn start_http(listener: TcpListener) {
     }
 }
 
-async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
+// Tipo para o pool de conexões TCP
+type TcpPool = Pool<TcpConnectionManager>;
+
+// Gerenciador de conexões TCP para o deadpool
+struct TcpConnectionManager {
+    addr: String,
+}
+
+impl Manager for TcpConnectionManager {
+    type Type = TcpStream;
+    type Error = Error;
+
+    async fn create(&self) -> Result<TcpStream, Error> {
+        TcpStream::connect(&self.addr).await
+    }
+
+    async fn recycle(&self, conn: &mut TcpStream) -> managed::RecycleResult<Error> {
+        // Verifica se a conexão ainda é utilizável
+        let mut buf = [0u8; 1];
+        match conn.peek(&mut buf).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(managed::RecycleError::Backend(e)),
+        }
+    }
+}
+
+async fn create_tcp_pool(addr: String, max_size: usize) -> Result<TcpPool, Error> {
+    let manager = TcpConnectionManager { addr };
+    let pool = Pool::builder(manager)
+        .max_size(max_size)
+        .build()
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    Ok(pool)
+}
+
+async fn handle_client(mut client_stream: TcpStream, ssh_pool: TcpPool, openvpn_pool: TcpPool) -> Result<(), Error> {
     let status = get_status();
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
@@ -64,20 +107,20 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let result = timeout(timeout_duration, peek_stream(&mut client_stream)).await
         .unwrap_or_else(|_| Ok(String::new()));
 
-    let addr_proxy = if let Ok(data) = result {
+    let (pool, addr_proxy) = if let Ok(data) = result {
         if is_ssh_protocol(&data) {
-            ssh_proxy
+            (ssh_pool, ssh_proxy)
         } else {
-            openvpn_proxy
+            (openvpn_pool, openvpn_proxy)
         }
     } else {
-        ssh_proxy
+        (ssh_pool, ssh_proxy)
     };
 
-    let server_stream = TcpStream::connect(&addr_proxy).await
+    let server_stream = pool.get().await
         .map_err(|e| {
-            error!("Erro ao conectar ao proxy {}: {}", addr_proxy, e);
-            e
+            error!("Erro ao obter conexão do pool para {}: {}", addr_proxy, e);
+            Error::new(std::io::ErrorKind::Other, e)
         })?;
 
     let (client_read, client_write) = client_stream.into_split();
