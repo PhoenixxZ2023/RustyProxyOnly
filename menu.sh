@@ -1,31 +1,19 @@
 #!/bin/bash
+# RUSTYPROXY MANAGER
 
 PORTS_FILE="/opt/rustyproxy/ports"
 
-# Cores
-BOLD="\033[1m"
-BLUE="\033[34m"
-CYAN="\033[36m"
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
+RED="\033[1;31m"
+GREEN="\033[1;32m"
+YELLOW="\033[1;33m"
+BLUE="\033[0;34m"
+WHITE_BG="\033[40;1;37m"
 RESET="\033[0m"
 
-verificar_usuario_root() {
-    if [ "$(id -u)" -ne 0 ]; then
-        echo -e "${RED}${BOLD}O SCRIPT DEVE SER EXECUTADO COMO ROOT. UTILIZE 'SUDO' PARA EXECUTAR O SCRIPT.${RESET}"
-        exit 1
-    fi
-}
-
-is_port_in_use() {
-    local port=$1
-    if lsof -i :$port > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
+if [ "$EUID" -ne 0 ]; then
+  echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
+  exit 1
+fi
 
 add_proxy_port() {
     local port=$1
@@ -117,24 +105,23 @@ update_proxy_status() {
 }
 
 uninstall_rustyproxy() {
-    uninstall_rustyproxy() {
     echo -e "${YELLOW}🗑️ DESINSTALANDO RUSTY PROXY, AGUARDE...${RESET}"
     sleep 2
     clear
 
     if [ -s "$PORTS_FILE" ]; then
-        while read -r port; do
-            del_proxy_port $port
+        while IFS='|' read -r port _; do
+            del_proxy_port "$port"
         done < "$PORTS_FILE"
     fi
-	
-    sudo rm -rf /opt/rustyproxy
-    sudo rm -f "$PORTS_FILE"
+
+    rm -rf /opt/rustyproxy
+    rm -f "$PORTS_FILE"
 
     echo -e "\033[0;36m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m"
     echo -e "\033[1;36m┃\E[44;1;37m RUSTY PROXY DESINSTALADO COM SUCESSO. \E[0m\033[0;36m┃"
     echo -e "\033[0;36m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
-    sleep 4
+    sleep 3
     clear
 }
 
@@ -165,7 +152,6 @@ show_menu() {
     echo -e "\033[1;36m┃\033[1;33mGERENCIAMENTO DE PORTAS - MULTI-PROXY  \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
 
-    # Exibe portas ativas, se houver
     if [ -s "$PORTS_FILE" ]; then
         active_ports=$(paste -sd ' ' "$PORTS_FILE")
         echo -e "\033[1;36m┃\033[1;33mPORTAS ATIVAS:\033[1;33m $(printf '%-21s' "$active_ports")   \033[1;36m┃\033[0m"
@@ -184,6 +170,7 @@ show_menu() {
 
     case $option in
         1)
+	    clear
             read -p "━➤ DIGITE A PORTA: " port
             while ! [[ $port =~ ^[0-9]+$ ]]; do
                 echo "━➤ DIGITE UMA PORTA VÁLIDA."
@@ -235,25 +222,18 @@ show_menu() {
             menu
             ;;
         0)
+	    clear
             exit 0
             ;;
         *)
-            echo "OPÇÃO INVÁLIDA. PRESSIONE QUALQUER TECLA PARA RETORNAR AO MENU."
-            read -n 1 dummy
+            echo "OPÇÃO INVÁLIDA. PRESSIONE QUALQUER TECLA PARA VOLTAR AO MENU."
+            read -n 1 -s -r
             ;;
     esac
 }
 
-# Verificar se o script está sendo executado como root
-verificar_usuario_root
+[ ! -f "$PORTS_FILE" ] && touch "$PORTS_FILE"
 
-# Verificar se o arquivo de portas existe, caso contrário, criar e definir permissões
-if [ ! -f "$PORTS_FILE" ]; then
-    sudo touch "$PORTS_FILE"
-    sudo chmod 777 "$PORTS_FILE"
-fi
-
-# Loop do menu
 while true; do
     show_menu
 done
