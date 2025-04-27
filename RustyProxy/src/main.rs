@@ -72,7 +72,6 @@ impl Manager for TcpConnectionManager {
     }
 
     async fn recycle(&self, conn: &mut TcpStream) -> managed::RecycleResult<Error> {
-        // Verifica se a conexão ainda é utilizável
         let mut buf = [0u8; 1];
         match conn.peek(&mut buf).await {
             Ok(_) => Ok(()),
@@ -105,16 +104,15 @@ async fn handle_client(mut client_stream: TcpStream, ssh_pool: TcpPool, openvpn_
     let (ssh_proxy, openvpn_proxy) = get_proxy_addresses();
     let timeout_duration = get_timeout_duration();
     let result = timeout(timeout_duration, peek_stream(&mut client_stream)).await
-        .unwrap_or_else(|_| Ok(String::new()));
+        .unwrap_or_else(|_| Ok(vec![]));
 
-    let (pool, addr_proxy) = if let Ok(data) = result {
-        if is_ssh_protocol(&data) {
-            (ssh_pool, ssh_proxy)
-        } else {
-            (openvpn_pool, openvpn_proxy)
-        }
-    } else {
-        (ssh_pool, ssh_proxy)
+    let (pool, addr_proxy) = match result {
+        Ok(data) => match detect_protocol(&data) {
+            Protocol::Ssh => (ssh_pool, ssh_proxy),
+            Protocol::OpenVpn => (openvpn_pool, openvpn_proxy),
+            Protocol::Unknown => (ssh_pool, ssh_proxy), // Fallback para SSH
+        },
+        Err(_) => (ssh_pool, ssh_proxy), // Fallback para SSH em caso de erro
     };
 
     let server_stream = pool.get().await
@@ -161,12 +159,11 @@ async fn transfer_data(
     Ok(())
 }
 
-async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+async fn peek_stream(stream: &TcpStream) -> Result<Vec<u8>, Error> {
     let mut peek_buffer = vec![0; 8192];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
-    let data = &peek_buffer[..bytes_peeked];
-    let data_str = String::from_utf8_lossy(data);
-    Ok(data_str.to_string())
+    peek_buffer.truncate(bytes_peeked);
+    Ok(peek_buffer)
 }
 
 fn get_port() -> u16 {
@@ -214,6 +211,32 @@ fn get_timeout_duration() -> Duration {
     Duration::from_secs(timeout_secs)
 }
 
-fn is_ssh_protocol(data: &str) -> bool {
-    data.starts_with("SSH-") || data.is_empty()
+#[derive(PartialEq)]
+enum Protocol {
+    Ssh,
+    OpenVpn,
+    Unknown,
+}
+
+fn detect_protocol(data: &[u8]) -> Protocol {
+    // Verifica SSH primeiro (baseado em texto)
+    let data_str = String::from_utf8_lossy(data);
+    if data_str.starts_with("SSH-") || data.is_empty() {
+        return Protocol::Ssh;
+    }
+
+    // Verifica OpenVPN (baseado em formato binário)
+    if data.len() >= 3 {
+        // Primeiro byte: comprimento do pacote (2 bytes, big-endian)
+        let packet_len = ((data[0] as u16) << 8) | (data[1] as u16);
+        // Terceiro byte: opcode
+        let opcode = data[2];
+        // OpenVPN opcodes comuns: 0x20 (P_CONTROL_HARD_RESET_CLIENT_V2), 0x21 (P_CONTROL_SOFT_RESET_V1), 0x38 (P_CONTROL_V1)
+        let valid_opcodes = [0x20, 0x21, 0x38];
+        if packet_len > 0 && packet_len <= 1500 && valid_opcodes.contains(&opcode) {
+            return Protocol::OpenVpn;
+        }
+    }
+
+    Protocol::Unknown
 }
