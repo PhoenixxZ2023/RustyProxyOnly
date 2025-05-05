@@ -44,7 +44,7 @@ WantedBy=multi-user.target"
     systemctl enable "proxy${port}.service"
     systemctl start "proxy${port}.service"
 
-    echo "$port|$status" >> "$PORTS_FILE"
+    echo "$port" >> "$PORTS_FILE"
     echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
 }
 
@@ -177,7 +177,7 @@ show_menu() {
                 read -p "━➤ DIGITE A PORTA: " port
             done
             read -p "━➤ DIGITE UM STATUS DE CONEXÃO (deixe vazio para o padrão): " status
-            add_proxy_port $port "$status"
+            add_proxy_port $port 
             read -p "━➤ PORTA ATIVADA COM SUCESSO. PRESSIONE QUALQUER TECLA." dummy
             ;;
         2)
