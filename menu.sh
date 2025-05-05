@@ -177,7 +177,7 @@ show_menu() {
                 read -p "━➤ DIGITE A PORTA: " port
             done
             read -p "━➤ DIGITE UM STATUS DE CONEXÃO (deixe vazio para o padrão): " status
-            add_proxy_port $port 
+            add_proxy_port $port "$status"
             read -p "━➤ PORTA ATIVADA COM SUCESSO. PRESSIONE QUALQUER TECLA." dummy
             ;;
         2)
