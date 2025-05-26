@@ -2,10 +2,9 @@ use std::env;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
-use std::collections::HashMap;
 
 // Estrutura para gerenciar configurações
 struct Config {
@@ -13,9 +12,7 @@ struct Config {
     status: String,
     ssh_port: u16,
     openvpn_port: u16,
-    udp_port: u16, // Porta fixa para UDP
     timeout_secs: u64,
-    default_udp_host: String, // Destino padrão para UDP
 }
 
 impl Config {
@@ -25,9 +22,7 @@ impl Config {
             status: get_status(),
             ssh_port: 22,
             openvpn_port: 1194,
-            udp_port: 7300, // Porta fixa para escutar UDP
             timeout_secs: 1,
-            default_udp_host: "0.0.0.0:7300".to_string(), // Destino padrão para UDP
         }
     }
 }
@@ -37,25 +32,12 @@ async fn main() -> Result<(), Error> {
     // Iniciando o proxy com configurações
     let config = Config::from_args();
     let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
-    let udp_socket = UdpSocket::bind(format!("[::]:{}", config.udp_port)).await?;
-    
-    println!("Iniciando serviço TCP na porta: {}", config.port);
-    println!("Iniciando serviço UDP na porta: {}", config.udp_port);
-    println!("RustyManager - Proxy TCP & UDP");
-    
-    // Mapa para armazenar destinos UDP por cliente
-    let udp_targets = Arc::new(Mutex::new(HashMap::new()));
-    
-    // Iniciar servidores TCP e UDP em paralelo
-    tokio::join!(
-        start_http(listener, udp_targets.clone()),
-        start_udp(udp_socket, udp_targets, config.default_udp_host.clone())
-    );
-    
+    println!("Iniciando serviço na porta: {}", config.port);
+    start_http(listener).await;
     Ok(())
 }
 
-async fn start_http(listener: TcpListener, udp_targets: Arc<Mutex<HashMap<String, (String, u16)>>>) {
+async fn start_http(listener: TcpListener) {
     // Adiciona máximo de conexões simultâneas
     let max_connections = Arc::new(Semaphore::new(1000));
 
@@ -63,10 +45,9 @@ async fn start_http(listener: TcpListener, udp_targets: Arc<Mutex<HashMap<String
         let permit = max_connections.clone().acquire_owned().await;
         match listener.accept().await {
             Ok((client_stream, addr)) => {
-                let udp_targets = udp_targets.clone();
                 tokio::spawn(async move {
                     let _permit = permit; // Mantém o permit ativo
-                    if let Err(e) = handle_client(client_stream, addr, udp_targets).await {
+                    if let Err(e) = handle_client(client_stream).await {
                         println!("Erro ao processar cliente {}: {}", addr, e);
                     }
                 });
@@ -78,56 +59,7 @@ async fn start_http(listener: TcpListener, udp_targets: Arc<Mutex<HashMap<String
     }
 }
 
-async fn start_udp(socket: UdpSocket, udp_targets: Arc<Mutex<HashMap<String, (String, u16)>>>, default_udp_host: String) {
-    let socket = Arc::new(socket);
-    let mut buffer = vec![0; 8192];
-
-    loop {
-        match socket.recv_from(&mut buffer).await {
-            Ok((bytes_read, client_addr)) => {
-                let data = &buffer[..bytes_read];
-                let client_addr_str = client_addr.to_string();
-
-                // Obter destino UDP
-                let (host, port) = {
-                    let targets = udp_targets.lock().await;
-                    if let Some(target) = targets.get(&client_addr_str) {
-                        target.clone()
-                    } else {
-                        // Usar destino padrão
-                        let parts: Vec<&str> = default_udp_host.split(':').collect();
-                        let host = parts[0].to_string();
-                        let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(7300);
-                        (host, port)
-                    }
-                };
-
-                println!("UDP Proxy: {} -> {}:{}", client_addr, host, port);
-
-                // Enviar pacote UDP bruto ao destino
-                let target_socket = UdpSocket::bind("[::]:0").await.unwrap();
-                if let Err(e) = target_socket.send_to(data, format!("{}:{}", host, port)).await {
-                    println!("Erro ao enviar UDP para {}:{}: {}", host, port, e);
-                    continue;
-                }
-
-                // Receber resposta do destino
-                let mut response_buffer = vec![0; 8192];
-                if let Ok(Ok((bytes_received, _))) = timeout(Duration::from_secs(2), target_socket.recv_from(&mut response_buffer)).await {
-                    // Encaminhar resposta ao cliente
-                    if let Err(e) = socket.send_to(&response_buffer[..bytes_received], client_addr).await {
-                        println!("Erro ao enviar resposta UDP para {}: {}", client_addr, e);
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Erro ao receber UDP: {}", e);
-            }
-        }
-    }
-}
-
-async fn handle_client(client_stream: TcpStream, addr: std::net::SocketAddr, udp_targets: Arc<Mutex<HashMap<String, (String, u16)>>>) -> Result<(), Error> {
+async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let config = Config::from_args();
     // Adiciona timeout para manipulação completa do cliente
     let result = timeout(Duration::from_secs(30), async {
@@ -136,18 +68,7 @@ async fn handle_client(client_stream: TcpStream, addr: std::net::SocketAddr, udp
             .await?;
 
         let mut buffer = vec![0; 1024];
-        let bytes_read = client_stream.read(&mut buffer).await?;
-        let data_str = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-
-        // Extrair X-Real-Host para configurar destino UDP
-        if let Some(host_port) = find_header(&data_str, "X-Real-Host") {
-            let parts: Vec<&str> = host_port.split(':').collect();
-            let host = parts[0].to_string();
-            let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(7300); // Porta padrão 7300 para destino
-            let mut targets = udp_targets.lock().await;
-            targets.insert(addr.to_string(), (host, port));
-        }
-
+        client_stream.read(&mut buffer).await?;
         client_stream
             .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", config.status).as_bytes())
             .await?;
@@ -182,7 +103,7 @@ async fn handle_client(client_stream: TcpStream, addr: std::net::SocketAddr, udp
     }).await;
 
     if let Err(e) = result {
-        println!("Timeout na manipulação do cliente {}: {}", addr, e);
+        println!("Timeout na manipulação do cliente: {}", e);
         Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
     } else {
         result.unwrap()
@@ -233,14 +154,6 @@ async fn detect_protocol(stream: &TcpStream) -> Result<&'static str, Error> {
     } else {
         Ok("openvpn")
     }
-}
-
-fn find_header(head: &str, header: &str) -> Option<String> {
-    let header_line = format!("{}: ", header);
-    let aux = head.find(&header_line)?;
-    let start = aux + header_line.len();
-    let end = head[start..].find("\r\n").map(|i| start + i)?;
-    Some(head[start..end].to_string())
 }
 
 fn get_port() -> u16 {
