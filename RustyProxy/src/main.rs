@@ -6,6 +6,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
+// Importações para tokio-tungstenite
+use tokio_tungstenite::{
+    accept_async, connect_async,
+    tungstenite::{
+        handshake::client::Request,
+        Message,
+    },
+};
+use futures_util::StreamExt; // Para o método .next() em WebSocketStreamExt
+use futures_util::SinkExt;   // Para o método .send() em WebSocketSinkExt
+
 // Estrutura para gerenciar configurações
 struct Config {
     port: u16,
@@ -76,8 +87,6 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
             "openvpn" => format!("0.0.0.0:{}", config.openvpn_port),
             "websocket" => format!("0.0.0.0:{}", config.websocket_port),
             _ => {
-                // Caso fallback, o detect_protocol já deve ter assumido ssh,
-                // mas para garantir, manteremos um fallback explícito.
                 println!("Protocolo desconhecido após detecção, encaminhando para SSH.");
                 format!("0.0.0.0:{}", config.ssh_port)
             },
@@ -86,25 +95,8 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
         println!("Protocolo detectado: {}. Encaminhando para: {}", protocol, addr_proxy);
 
         if protocol == "websocket" {
-            // Realiza o handshake WebSocket manualmente no lado do cliente
-            let client_stream = perform_websocket_handshake(client_stream, config).await?;
-            let server_stream = TcpStream::connect(&addr_proxy).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy WebSocket {}: {}", addr_proxy, e)))?;
-            // Realiza o handshake WebSocket manualmente no lado do servidor (se o servidor for um endpoint WebSocket)
-            let server_stream = perform_websocket_handshake(server_stream, config).await?;
-
-            let (client_read, client_write) = client_stream.into_split();
-            let (server_read, server_write) = server_stream.into_split();
-
-            let client_read_arc = Arc::new(Mutex::new(client_read));
-            let client_write_arc = Arc::new(Mutex::new(client_write));
-            let server_read_arc = Arc::new(Mutex::new(server_read));
-            let server_write_arc = Arc::new(Mutex::new(server_write));
-
-            let client_to_server = transfer_websocket_data(client_read_arc.clone(), server_write_arc.clone(), config);
-            let server_to_client = transfer_websocket_data(server_read_arc.clone(), client_write_arc.clone(), config);
-
-            tokio::try_join!(client_to_server, server_to_client)?;
+            // Nova função para lidar com o proxy WebSocket
+            handle_websocket_proxy(client_stream, &addr_proxy, config).await?;
         } else {
             // Manipulação para SSH e OpenVPN (ou qualquer outro que caia aqui)
             let server_stream = TcpStream::connect(&addr_proxy).await
@@ -135,29 +127,125 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
     }
 }
 
-async fn perform_websocket_handshake(mut stream: TcpStream, config: &Config) -> Result<TcpStream, Error> {
-    let mut buffer = vec![0; 4096]; // Buffer menor para o handshake, já que não é esperado um request gigante
-    let bytes_read = timeout(Duration::from_secs(config.timeout_secs), stream.read(&mut buffer)).await
-        .map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do handshake WebSocket"))??;
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-    println!("Handshake WebSocket recebido: {:?}", request);
+// NOVO: Função para lidar com o proxy de WebSocket
+async fn handle_websocket_proxy(
+    client_stream: TcpStream,
+    server_addr: &str,
+    config: &Config,
+) -> Result<(), Error> {
+    println!("Iniciando proxy WebSocket para {}", server_addr);
 
-    // Simplificação: aceita qualquer requisição WebSocket sem validar Sec-WebSocket-Key
-    // Em um ambiente de produção, você precisaria de uma validação completa
-    // e da geração da resposta Sec-WebSocket-Accept correta.
-    let response = format!(
-        "HTTP/1.1 101 Switching Protocols\r\n\
-         Upgrade: websocket\r\n\
-         Connection: Upgrade\r\n\
-         Sec-WebSocket-Accept: simplified-accept-key\r\n\r\n" // Esta chave é fixa, não segura para prod.
-    );
+    // 1. Aceita a conexão WebSocket do cliente (realiza o handshake completo)
+    let ws_client_stream = accept_async(client_stream).await
+        .map_err(|e| Error::new(ErrorKind::Other, format!("Falha no handshake WS do cliente: {}", e)))?;
+    println!("Handshake WebSocket do cliente concluído.");
 
-    timeout(Duration::from_secs(config.timeout_secs), stream.write_all(response.as_bytes())).await
-        .map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na escrita do handshake WebSocket"))??;
+    // 2. Conecta ao servidor WebSocket de backend
+    // Nota: Para WSS (WebSocket seguro), você precisaria de "wss://" e TLS.
+    // Para simplificar, estamos usando ws:// para a conexão de backend.
+    let (ws_server_stream, response) = connect_async(format!("ws://{}", server_addr)).await
+        .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", server_addr, e)))?;
+    println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", server_addr, response.status());
 
-    Ok(stream)
+
+    // Separa as streams em sink (escrita) e stream (leitura)
+    let (mut client_sink, mut client_stream) = ws_client_stream.split();
+    let (mut server_sink, mut server_stream) = ws_server_stream.split();
+
+    // Tarefa para encaminhar do cliente WS para o servidor WS
+    let client_to_server_task = async move {
+        loop {
+            tokio::select! {
+                // Tenta ler uma mensagem do cliente com timeout
+                res = timeout(Duration::from_secs(config.timeout_secs), client_stream.next()) => {
+                    let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do cliente WS"))?;
+
+                    let msg = match msg_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            println!("Erro ao ler mensagem do cliente WS: {}", e);
+                            return Err(e.into());
+                        },
+                        None => {
+                            println!("Cliente WS fechou a conexão.");
+                            break; // Cliente fechou a stream
+                        },
+                    };
+
+                    // Se for uma mensagem de fechamento, envia para o servidor e encerra
+                    if msg.is_close() {
+                        println!("Cliente WS enviou mensagem de CLOSE.");
+                        server_sink.send(msg).await
+                            .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para servidor WS: {}", e)))?;
+                        break;
+                    }
+                    if msg.is_ping() {
+                        // tungstenite responde PONG automaticamente, apenas logamos
+                        // println!("Cliente WS enviou PING.");
+                        continue; // Não precisa encaminhar pings/pongs, a biblioteca cuida
+                    }
+
+                    // Encaminha a mensagem para o servidor
+                    // println!("Encaminhando mensagem do cliente WS ({} bytes, tipo: {:?})", msg.len(), msg.opcode());
+                    server_sink.send(msg).await
+                        .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para servidor: {}", e)))?;
+                }
+            }
+        }
+        Ok::<(), Error>(()) // Especifica o tipo de retorno
+    };
+
+    // Tarefa para encaminhar do servidor WS para o cliente WS
+    let server_to_client_task = async move {
+        loop {
+            tokio::select! {
+                // Tenta ler uma mensagem do servidor com timeout
+                res = timeout(Duration::from_secs(config.timeout_secs), server_stream.next()) => {
+                    let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do servidor WS"))?;
+
+                    let msg = match msg_opt {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            println!("Erro ao ler mensagem do servidor WS: {}", e);
+                            return Err(e.into());
+                        },
+                        None => {
+                            println!("Servidor WS fechou a conexão.");
+                            break; // Servidor fechou a stream
+                        },
+                    };
+
+                    if msg.is_close() {
+                        println!("Servidor WS enviou mensagem de CLOSE.");
+                        client_sink.send(msg).await
+                            .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para cliente WS: {}", e)))?;
+                        break;
+                    }
+                    if msg.is_ping() {
+                        // tungstenite responde PONG automaticamente
+                        // println!("Servidor WS enviou PING.");
+                        continue;
+                    }
+
+                    // Encaminha a mensagem para o cliente
+                    // println!("Encaminhando mensagem do servidor WS ({} bytes, tipo: {:?})", msg.len(), msg.opcode());
+                    client_sink.send(msg).await
+                        .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para cliente: {}", e)))?;
+                }
+            }
+        }
+        Ok::<(), Error>(()) // Especifica o tipo de retorno
+    };
+
+    // Aguarda ambas as tarefas de encaminhamento terminarem
+    tokio::try_join!(client_to_server_task, server_to_client_task)?;
+
+    println!("Proxy WebSocket finalizado.");
+    Ok(())
 }
 
+
+// --- Funções de transferência TCP genérica (não mudam) ---
 async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
@@ -170,68 +258,20 @@ async fn transfer_data(
             match timeout(Duration::from_secs(config.timeout_secs), read_guard.read(&mut buffer)).await {
                 Ok(Ok(n)) => n,
                 Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura")),
+                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura TCP")),
             }
         };
 
         if bytes_read == 0 {
-            // println!("Conexão TCP fechada, bytes lidos: 0"); // Pode ser muito log
+            // println!("Conexão TCP fechada, bytes lidos: 0");
             break;
         }
 
         let mut write_guard = write_stream.lock().await;
         match timeout(Duration::from_secs(config.timeout_secs), write_guard.write_all(&buffer[..bytes_read])).await {
-            Ok(Ok(())) => { /* println!("Transferidos {} bytes", bytes_read); */ }, // Pode ser muito log
+            Ok(Ok(())) => { /* println!("Transferidos {} bytes", bytes_read); */ },
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita")),
-        }
-    }
-    Ok(())
-}
-
-async fn transfer_websocket_data(
-    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
-    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    config: &Config,
-) -> Result<(), Error> {
-    let mut buffer = vec![0; 32768];
-    loop {
-        let bytes_read = {
-            let mut read_guard = read_stream.lock().await;
-            match timeout(Duration::from_secs(config.timeout_secs), read_guard.read(&mut buffer)).await {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura WebSocket")),
-            }
-        };
-
-        if bytes_read == 0 {
-            // println!("Conexão WebSocket fechada"); // Pode ser muito log
-            break;
-        }
-
-        // Processar quadro WebSocket (simplificado: suporta apenas texto/binário, FIN=1, sem máscara)
-        if bytes_read < 2 {
-            return Err(Error::new(ErrorKind::InvalidData, "Quadro WebSocket inválido ou muito curto"));
-        }
-        let opcode = buffer[0] & 0x0F;
-        let fin_rsv_mask = buffer[0] & 0xF0; // FIN, RSV1, RSV2, RSV3
-
-        // Apenas para log, payload_len e payload_start são mais complexos com extensões e chaves de máscara.
-        // Como o proxy está apenas encaminhando, não precisa desmascarar ou interpretar o payload aqui.
-        // A lógica de transferência apenas retransmite os bytes brutos do quadro WebSocket.
-        // A detecção já deveria ter garantido que o fluxo é WebSocket.
-
-        if opcode != 0x1 && opcode != 0x2 && opcode != 0x8 && opcode != 0x9 && opcode != 0xA {
-            // Log apenas opcodes que não são de dados ou de controle (ping, pong, close)
-            // println!("Ignorando/repassando quadro WebSocket com opcode desconhecido {}", opcode);
-        }
-
-        let mut write_guard = write_stream.lock().await;
-        match timeout(Duration::from_secs(config.timeout_secs), write_guard.write_all(&buffer[..bytes_read])).await {
-            Ok(Ok(())) => { /* println!("Transferida mensagem WebSocket ({} bytes)", bytes_read); */ }, // Pode ser muito log
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita WebSocket")),
+            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita TCP")),
         }
     }
     Ok(())
@@ -242,10 +282,11 @@ async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data).to_string();
-    // println!("Dados inspecionados: {:?}", data_str); // Pode ser muito log
+    // println!("Dados inspecionados: {:?}", data_str);
     Ok(data_str)
 }
 
+// --- Funções de detecção de protocolo e args (não mudam, mas melhoradas) ---
 async fn detect_protocol(stream: &TcpStream, config: &Config) -> Result<&'static str, Error> {
     let data = timeout(Duration::from_secs(config.timeout_secs * 2), peek_stream(stream)) // Aumenta o timeout para detecção
         .await
@@ -255,24 +296,23 @@ async fn detect_protocol(stream: &TcpStream, config: &Config) -> Result<&'static
         })?;
 
     // Priorize detecções mais específicas primeiro
-    if data.contains("Upgrade: websocket") && data.contains("GET / HTTP/1.1") {
+    // WebSocket precisa de "Upgrade: websocket" E algum tipo de requisição HTTP (GET, POST, etc.)
+    if data.contains("Upgrade: websocket") && (data.starts_with("GET ") || data.starts_with("POST ") || data.starts_with("CONNECT ")) {
         println!("Protocolo detectado: WebSocket (baseado em HTTP Upgrade)");
         Ok("websocket")
     } else if data.starts_with("SSH-2.0-") {
         println!("Protocolo detectado: SSH");
         Ok("ssh")
-    } else if data.starts_with("CONNECT") || data.starts_with("GET ") || data.starts_with("POST ") {
-        println!("Protocolo detectado: HTTP (requisição HTTP inicial, pode ser túnel)");
-        Ok("http") // Pode ser um HTTP proxy ou túnel, que eventualmente pode ser WebSocket
+    } else if data.starts_with("CONNECT ") || data.starts_with("GET ") || data.starts_with("POST ") || data.starts_with("HTTP/1.") {
+        println!("Protocolo detectado: HTTP genérico (pode ser túnel HTTP/HTTPS)");
+        Ok("http") // Não é explicitamente um dos 3, mas é HTTP
     } else if data.len() >= 2 && data.as_bytes()[0] == 0x00 && data.as_bytes()[1] >= 0x14 {
-        // Esta é uma heurística para OpenVPN. É importante entender que não é 100% garantido.
         println!("Protocolo detectado: OpenVPN (baseado em bytes iniciais)");
         Ok("openvpn")
     } else if data.is_empty() {
         println!("Nenhum dado recebido durante a detecção, assumindo SSH (comum para clientes que enviam dados lentamente)");
-        Ok("ssh") // Fallback para SSH se nenhum dado for recebido rapidamente
+        Ok("ssh")
     } else {
-        // Se nada for detectado, loga o que foi visto e assume SSH
         println!("Protocolo desconhecido (dados iniciais: {:?}). Assumindo SSH.", &data);
         Ok("ssh")
     }
