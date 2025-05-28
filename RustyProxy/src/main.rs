@@ -223,7 +223,7 @@ async fn transfer_websocket_data(
 }
 
 async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 32768];
+    let mut peek_buffer = vec![0; 1024];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data).to_string();
