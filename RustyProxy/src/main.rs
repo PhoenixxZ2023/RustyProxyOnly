@@ -8,10 +8,10 @@ use tokio::time::{timeout, Duration};
 
 // Importações para tokio-tungstenite
 use tokio_tungstenite::{
-    accept_async, connect_async,
+    accept_async, connect_async, // <--- Importa as funções de aceitação e conexão padrão
     tungstenite::{
-        handshake::client::Request,
-        Message,
+        // handshake::client::Request, // Esta importação não é estritamente necessária se não for usada explicitamente
+        Message, // <--- Importa o tipo de mensagem WebSocket
     },
 };
 use futures_util::StreamExt; // Para o método .next() em WebSocketStreamExt
