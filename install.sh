@@ -23,10 +23,10 @@ if [ "$EUID" -ne 0 ]; then
 else
     clear
     echo ""
-echo -e "\033[0;34m           ╦═╗╦ ╦╔═╗╔╦╗╦ ╦  ╔═╗╦═╗╔═╗═╗ ╦╦ ╦                          "
-echo -e "\033[0;37m           ╠╦╝║ ║╚═╗ ║ ╚╦╝  ╠═╝╠╦╝║ ║╔╩╦╝╚╦╝                          "
-echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚═╚═╝╩ ╚═ ╩  \033[0;37m2025           "
-    echo -e " "              
+echo -e "\033[0;34m           ╦═╗╦ ╦╔═╗╔╦╗╦ ╦  ╔═╗╦═╗╔═╗═╗ ╦╦ ╦                    "
+echo -e "\033[0;37m           ╠╦╝║ ║╚═╗ ║ ╚╦╝  ╠═╝╠╦╝║ ║╔╩╦╝╚╦╝                    "
+echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚═╚═╝╩ ╚═ ╩  \033[0;37m2025        "
+    echo -e " "             
     echo -e " "
     show_progress "ATUALIZANDO REPOSITÓRIO..."
     export DEBIAN_FRONTEND=noninteractive
@@ -51,7 +51,7 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
                     show_progress "SISTEMA UBUNTU SUPORTADO, CONTINUANDO..."
                     ;;
                 *)
-                    error_exit "VERSÃO DO UBUNTU. USE O UBUNTU 18, 20, 22 ou 24."
+                    error_exit "VERSÃO DO UBUNTU NÃO SUPORTADA. USE UBUNTU 18, 20, 22 ou 24."
                     ;;
             esac
             ;;
@@ -61,7 +61,7 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
                     show_progress "SISTEMA DEBIAN SUPORTADO, CONTINUANDO..."
                     ;;
                 *)
-                    error_exit "VERSÃO DO UBUNTU. USE O DEBIAN 9, 10, 11 ou 12."
+                    error_exit "VERSÃO DO DEBIAN NÃO SUPORTADA. USE DEBIAN 9, 10, 11 ou 12."
                     ;;
             esac
             ;;
@@ -72,57 +72,67 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     increment_step
 
     # ---->>>> Instalação de pacotes requisitos e atualização do sistema
-    show_progress "ATUALIZANDO O SISTEMA, AGUARDE..."
+    show_progress "ATUALIZANDO O SISTEMA E INSTALANDO DEPENDÊNCIAS, AGUARDE..."
     apt upgrade -y > /dev/null 2>&1 || error_exit "Falha ao atualizar o sistema"
-    apt-get install curl build-essential git -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes"
+    apt-get install curl build-essential git -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes essenciais (curl, build-essential, git)"
     increment_step
 
     # ---->>>> Criando o diretório do script
-    show_progress "CRIANDO DIRETÓRIO..."
-    mkdir -p /opt/rustyproxy > /dev/null 2>&1
+    show_progress "CRIANDO DIRETÓRIO PARA O PROXY..."
+    mkdir -p /opt/rustyproxy > /dev/null 2>&1 || error_exit "Falha ao criar o diretório /opt/rustyproxy"
     increment_step
 
     # ---->>>> Instalar rust
-    show_progress "INSTALANDO RUST..."
+    show_progress "INSTALANDO RUST TOOLCHAIN, ISSO PODE LEVAR ALGUNS MINUTOS..."
     if ! command -v rustc &> /dev/null; then
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1 || error_exit "Falha ao instalar Rust"
-        source "$HOME/.cargo/env"
+        # Importante: Source o ambiente do Cargo para que `cargo build` funcione no script
+        source "/root/.cargo/env" || error_exit "Falha ao carregar o ambiente Rust. Verifique a instalação do Rust."
+    else
+        echo "Rust já está instalado."
     fi
     increment_step
 
     # ---->>>> Instalar o RustyProxy
-    show_progress "COMPILANDO RUSTYPROXY, ISSO PODE LEVAR ALGUM TEMPO, AGUARDE..."
+    show_progress "CLONANDO E COMPILANDO RUSTYPROXY, ISSO PODE LEVAR UM TEMPO, AGUARDE..."
 
+    # Garante que o diretório de clone está limpo
     if [ -d "/root/RustyProxyOnly" ]; then
-        rm -rf /root/RustyProxyOnly
+        rm -rf /root/RustyProxyOnly || error_exit "Falha ao remover diretório antigo de clone"
     fi
 
-
-    git clone --branch "main" https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar rustyproxy"
-    mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu
-    cd /root/RustyProxyOnly/RustyProxy
-    cargo build --release --jobs $(nproc) > /dev/null 2>&1 || error_exit "Falha ao compilar rustyproxy"
-    mv ./target/release/RustyProxy /opt/rustyproxy/proxy
+    # Clona o repositório
+    git clone --branch "main" https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar o repositório RustyProxyOnly"
+    
+    # Move o menu.sh para o diretório de instalação
+    mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu || error_exit "Falha ao mover o script de menu"
+    
+    # Navega para o diretório do projeto Rust e compila
+    cd /root/RustyProxyOnly/RustyProxy || error_exit "Diretório do projeto Rust não encontrado"
+    cargo build --release --jobs $(nproc) > /dev/null 2>&1 || error_exit "Falha ao compilar o RustyProxy. Verifique as dependências e o código."
+    
+    # Move o executável compilado
+    mv ./target/release/RustyProxy /opt/rustyproxy/proxy || error_exit "Falha ao mover o executável compilado"
     increment_step
 
     # ---->>>> Configuração de permissões
-    show_progress "CONFIGURANDO PERMISSÕES..."
-    chmod +x /opt/rustyproxy/proxy
-    chmod +x /opt/rustyproxy/menu
-    ln -sf /opt/rustyproxy/menu /usr/local/bin/rustyproxy
+    show_progress "CONFIGURANDO PERMISSÕES E CRIANDO LINK SIMBÓLICO..."
+    chmod +x /opt/rustyproxy/proxy || error_exit "Falha ao definir permissões para o proxy"
+    chmod +x /opt/rustyproxy/menu || error_exit "Falha ao definir permissões para o menu"
+    ln -sf /opt/rustyproxy/menu /usr/local/bin/rustyproxy || error_exit "Falha ao criar link simbólico para o menu"
     increment_step
 
     # ---->>>> Limpeza
     show_progress "LIMPANDO DIRETÓRIOS TEMPORÁRIOS, AGUARDE..."
-    cd /root/
-    rm -rf /root/RustyProxyOnly/
+    cd /root/ || error_exit "Não foi possível retornar ao diretório /root/"
+    rm -rf /root/RustyProxyOnly/ || error_exit "Falha ao limpar diretórios temporários"
     increment_step
 
     # ---->>>> Instalação finalizada :)
 clear
 echo -e " "
 echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
-echo -e "\E[44;1;37m            INSTALAÇÃO FINALIZADA COM SUCESSO                 \E[0m"
+echo -e "\E[44;1;37m        INSTALAÇÃO FINALIZADA COM SUCESSO               \E[0m"
 echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
 echo -e " "
 echo -e "\033[1;31m \033[1;33mDIGITE O COMANDO PARA ACESSAR O MENU: \033[1;32mrustyproxy\033[0m"
