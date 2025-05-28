@@ -8,12 +8,12 @@ use tokio::time::{timeout, Duration};
 
 // Estrutura para gerenciar configurações
 struct Config {
-    port: u16,
-    status: String,
-    ssh_port: u16,
-    openvpn_port: u16,
-    websocket_backend_port: u16, // Porta do servidor WebSocket de backend
-    timeout_secs: u64,
+    port: u16,              // Porta única para todos os protocolos (via --port)
+    status: String,         // Status para respostas HTTP
+    ssh_port: u16,          // Porta do servidor SSH de backend
+    openvpn_port: u16,      // Porta do servidor OpenVPN de backend
+    websocket_port: u16,     // Porta do servidor WebSocket de backend
+    timeout_secs: u64,      // Timeout para operações
 }
 
 impl Config {
@@ -23,7 +23,7 @@ impl Config {
             status: get_status(),
             ssh_port: 22,
             openvpn_port: 1194,
-            websocket_backend_port: 8081, // Porta do servidor WebSocket de backend
+            websocket_port: 8081, // Porta do servidor WebSocket de backend
             timeout_secs: 1,
         }
     }
@@ -33,7 +33,7 @@ impl Config {
 async fn main() -> Result<(), Error> {
     let config = Arc::new(Config::from_args());
     let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
-    println!("Iniciando serviço na porta: {}", config.port);
+    println!("Iniciando proxy na porta: {} para SSH, OpenVPN e WebSocket", config.port);
     start_proxy(listener, config).await;
     Ok(())
 }
@@ -48,7 +48,7 @@ async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
                 let config = config.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
-                    println!("Nova conexão de {}", addr);
+                    println!("Nova conexão de {} na porta {}", addr, config.port);
                     if let Err(e) = handle_client(client_stream, &config).await {
                         println!("Erro ao processar cliente {}: {}", addr, e);
                     } else {
@@ -69,7 +69,7 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
         let addr_proxy = match protocol {
             "ssh" => format!("0.0.0.0:{}", config.ssh_port),
             "openvpn" => format!("0.0.0.0:{}", config.openvpn_port),
-            "websocket" => format!("0.0.0.0:{}", config.websocket_backend_port),
+            "websocket" => format!("0.0.0.0:{}", config.websocket_port),
             _ => format!("0.0.0.0:{}", config.ssh_port),
         };
 
