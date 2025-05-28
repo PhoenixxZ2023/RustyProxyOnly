@@ -12,7 +12,7 @@ struct Config {
     status: String,
     ssh_port: u16,
     openvpn_port: u16,
-    websocket_port: u16, // Porta para WebSocket
+    websocket_backend_port: u16, // Porta do servidor WebSocket de backend
     timeout_secs: u64,
 }
 
@@ -23,7 +23,7 @@ impl Config {
             status: get_status(),
             ssh_port: 22,
             openvpn_port: 1194,
-            websocket_port: 8081, // Porta padrão para WebSocket
+            websocket_backend_port: 8081, // Porta do servidor WebSocket de backend
             timeout_secs: 1,
         }
     }
@@ -69,16 +69,27 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
         let addr_proxy = match protocol {
             "ssh" => format!("0.0.0.0:{}", config.ssh_port),
             "openvpn" => format!("0.0.0.0:{}", config.openvpn_port),
-            "websocket" => format!("0.0.0.0:{}", config.websocket_port),
+            "websocket" => format!("0.0.0.0:{}", config.websocket_backend_port),
             _ => format!("0.0.0.0:{}", config.ssh_port),
         };
 
         if protocol == "websocket" {
-            // Realiza o handshake WebSocket manualmente
+            // Envia resposta HTTP 101 inicial para WebSocket
+            let mut client_stream = client_stream;
+            client_stream
+                .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", config.status).as_bytes())
+                .await?;
+
+            // Realiza o handshake WebSocket
             let client_stream = perform_websocket_handshake(client_stream, config).await?;
             let server_stream = TcpStream::connect(&addr_proxy).await
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy WebSocket {}: {}", addr_proxy, e)))?;
             let server_stream = perform_websocket_handshake(server_stream, config).await?;
+
+            // Envia resposta HTTP 200 após handshake
+            client_stream
+                .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", config.status).as_bytes())
+                .await?;
 
             let (client_read, client_write) = client_stream.into_split();
             let (server_read, server_write) = server_stream.into_split();
@@ -93,7 +104,7 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
 
             tokio::try_join!(client_to_server, server_to_client)?;
         } else {
-            // Manipulação para SSH e OpenVPN
+            // Manipulação para SSH e OpenVPN (sem respostas HTTP)
             let server_stream = TcpStream::connect(&addr_proxy).await
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy {}: {}", addr_proxy, e)))?;
 
@@ -223,7 +234,7 @@ async fn transfer_websocket_data(
 }
 
 async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 1024];
+    let mut peek_buffer = vec![0; 32768];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data).to_string();
