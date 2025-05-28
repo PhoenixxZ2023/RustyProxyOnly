@@ -21,9 +21,9 @@ impl Config {
         Config {
             port: get_port(),
             status: get_status(),
-            ssh_port: 22,
-            openvpn_port: 1194,
-            websocket_port: 8081, // Porta do servidor WebSocket de backend
+            ssh_port: get_ssh_port(),
+            openvpn_port: get_openvpn_port(),
+            websocket_port: get_websocket_port(),
             timeout_secs: 1,
         }
     }
@@ -32,7 +32,13 @@ impl Config {
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let config = Arc::new(Config::from_args());
-    let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
+    let listener = match TcpListener::bind(format!("[::]:{}", config.port)).await {
+        Ok(listener) => listener,
+        Err(e) => {
+            println!("Erro ao vincular a porta {}: {}. Verifique se a porta está livre.", config.port, e);
+            return Err(e);
+        }
+    };
     println!("Iniciando proxy na porta: {} para SSH, OpenVPN e WebSocket", config.port);
     start_proxy(listener, config).await;
     Ok(())
@@ -82,8 +88,13 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
 
             // Realiza o handshake WebSocket
             let client_stream = perform_websocket_handshake(client_stream, config).await?;
-            let server_stream = TcpStream::connect(&addr_proxy).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy WebSocket {}: {}", addr_proxy, e)))?;
+            let server_stream = match TcpStream::connect(&addr_proxy).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    println!("Erro ao conectar ao servidor WebSocket {}: {}. Verifique se o servidor está ativo.", addr_proxy, e);
+                    return Err(e);
+                }
+            };
             let server_stream = perform_websocket_handshake(server_stream, config).await?;
 
             // Envia resposta HTTP 200 após handshake
@@ -104,9 +115,14 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
 
             tokio::try_join!(client_to_server, server_to_client)?;
         } else {
-            // Manipulação para SSH e OpenVPN (sem respostas HTTP)
-            let server_stream = TcpStream::connect(&addr_proxy).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy {}: {}", addr_proxy, e)))?;
+            // Manipulação para SSH e OpenVPN
+            let server_stream = match TcpStream::connect(&addr_proxy).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    println!("Erro ao conectar ao servidor {}: {}. Verifique se o servidor está ativo.", addr_proxy, e);
+                    return Err(e);
+                }
+            };
 
             let (client_read, client_write) = client_stream.into_split();
             let (server_read, server_write) = server_stream.into_split();
@@ -270,10 +286,8 @@ fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
     let mut port = 80;
     for i in 1..args.len() {
-        if args[i] == "--port" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(80);
-            }
+        if args[i] == "--port" && i + 1 < args.len() {
+            port = args[i + 1].parse().unwrap_or(80);
         }
     }
     port
@@ -283,11 +297,42 @@ fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
     let mut status = String::from("@RustyManager");
     for i in 1..args.len() {
-        if args[i] == "--status" {
-            if i + 1 < args.len() {
-                status = args[i + 1].clone();
-            }
+        if args[i] == "--status" && i + 1 < args.len() {
+            status = args[i + 1].clone();
         }
     }
     status
+}
+
+fn get_ssh_port() -> u16 {
+    let args: Vec<String> = env::args().collect();
+    let mut port = 22;
+    for i in 1..args.len() {
+        if args[i] == "--ssh-port" && i + 1 < args.len() {
+            port = args[i + 1].parse().unwrap_or(22);
+        }
+    }
+    port
+}
+
+fn get_openvpn_port() -> u16 {
+    let args: Vec<String> = env::args().collect();
+    let mut port = 1194;
+    for i in 1..args.len() {
+        if args[i] == "--openvpn-port" && i + 1 < args.len() {
+            port = args[i + 1].parse().unwrap_or(1194);
+        }
+    }
+    port
+}
+
+fn get_websocket_port() -> u16 {
+    let args: Vec<String> = env::args().collect();
+    let mut port = 8081;
+    for i in 1..args.len() {
+        if args[i] == "--websocket-port" && i + 1 < args.len() {
+            port = args[i + 1].parse().unwrap_or(8081);
+        }
+    }
+    port
 }
