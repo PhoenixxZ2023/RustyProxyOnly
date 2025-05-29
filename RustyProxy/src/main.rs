@@ -6,12 +6,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 
-// Importações para tokio-tungstenite
+// Importações para tokio-tungstenite (Opção 2)
 use tokio_tungstenite::{
-    accept_async, connect_async, // <--- Importa as funções de aceitação e conexão padrão
+    accept_hdr_async, connect_async,
     tungstenite::{
-        // handshake::client::Request, // Esta importação não é estritamente necessária se não for usada explicitamente
-        Message, // <--- Importa o tipo de mensagem WebSocket
+        handshake::server::{Request, Response},
+        Message, // <--- Importa o tipo de mensagem WebSocket (agora será usado explicitamente)
     },
 };
 use futures_util::StreamExt; // Para o método .next() em WebSocketStreamExt
@@ -127,7 +127,7 @@ async fn handle_client(client_stream: TcpStream, config: &Config) -> Result<(), 
     }
 }
 
-// NOVO: Função para lidar com o proxy de WebSocket
+// NOVO: Função para lidar com o proxy de WebSocket usando accept_hdr_async
 async fn handle_websocket_proxy(
     client_stream: TcpStream,
     server_addr: &str,
@@ -135,17 +135,25 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket para {}", server_addr);
 
-    // 1. Aceita a conexão WebSocket do cliente (realiza o handshake completo)
-    let ws_client_stream = accept_async(client_stream).await
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Falha no handshake WS do cliente: {}", e)))?;
+    // 1. Aceita a conexão WebSocket do cliente (com callback para cabeçalhos)
+    let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, mut response: Response| {
+        // --- Lógica opcional para inspecionar/modificar cabeçalhos ---
+        println!("Handshake Request Headers do Cliente: {:?}", req.headers());
+
+        // Exemplo: Você pode verificar o cabeçalho 'User-Agent'
+        if let Some(user_agent) = req.headers().get("User-Agent") {
+            println!("User-Agent do Cliente: {:?}", user_agent);
+        }
+
+        Ok(response) // Aceita a resposta padrão do handshake WebSocket
+    }).await
+    .map_err(|e| Error::new(ErrorKind::Other, format!("Falha no handshake WS do cliente: {}", e)))?;
     println!("Handshake WebSocket do cliente concluído.");
 
     // 2. Conecta ao servidor WebSocket de backend
-    // Nota: Para WSS (WebSocket seguro), você precisaria de "wss://" e TLS.
-    // Para simplificar, estamos usando ws:// para a conexão de backend.
-    let (ws_server_stream, response) = connect_async(format!("ws://{}", server_addr)).await
+    let (ws_server_stream, response_server) = connect_async(format!("ws://{}", server_addr)).await
         .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", server_addr, e)))?;
-    println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", server_addr, response.status());
+    println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", server_addr, response_server.status());
 
 
     // Separa as streams em sink (escrita) e stream (leitura)
@@ -163,8 +171,8 @@ async fn handle_websocket_proxy(
                     let msg = match msg_opt {
                         Some(Ok(m)) => m,
                         Some(Err(e)) => {
-                            println!("Erro ao ler mensagem do cliente WS: {}", e);
-                            return Err(e.into());
+                            // CORREÇÃO: Converte o erro de tungstenite::Error para std::io::Error
+                            return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do cliente WS: {}", e)));
                         },
                         None => {
                             println!("Cliente WS fechou a conexão.");
@@ -206,8 +214,8 @@ async fn handle_websocket_proxy(
                     let msg = match msg_opt {
                         Some(Ok(m)) => m,
                         Some(Err(e)) => {
-                            println!("Erro ao ler mensagem do servidor WS: {}", e);
-                            return Err(e.into());
+                            // CORREÇÃO: Converte o erro de tungstenite::Error para std::io::Error
+                            return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do servidor WS: {}", e)));
                         },
                         None => {
                             println!("Servidor WS fechou a conexão.");
