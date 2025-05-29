@@ -36,11 +36,12 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     # ---->>>> Verificação do sistema
     show_progress "VERIFICANDO SISTEMA..."
     if ! command -v lsb_release &> /dev/null; then
+        # Redireciona a saída da instalação do lsb-release
         apt install lsb-release -y > /dev/null 2>&1 || error_exit "Falha ao instalar lsb-release"
     fi
     increment_step
 
-    # ---->>>> Verificação do sistema
+    # ---->>>> Verificação do sistema (Lógica inalterada, apenas progresso)
     OS_NAME=$(lsb_release -is)
     VERSION=$(lsb_release -rs)
 
@@ -73,7 +74,8 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
 
     # ---->>>> Instalação de pacotes requisitos e atualização do sistema
     show_progress "ATUALIZANDO O SISTEMA E INSTALANDO DEPENDÊNCIAS, AGUARDE..."
-    # A LINHA ABAIXO FOI MODIFICADA
+    # Redireciona a saída do upgrade e da instalação de pacotes
+    apt upgrade -y > /dev/null 2>&1 || error_exit "Falha ao atualizar o sistema"
     apt-get install curl build-essential git pkg-config libssl-dev -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes essenciais (curl, build-essential, git, pkg-config, libssl-dev)"
     increment_step
 
@@ -85,8 +87,8 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     # ---->>>> Instalar rust
     show_progress "INSTALANDO RUST TOOLCHAIN, ISSO PODE LEVAR ALGUNS MINUTOS..."
     if ! command -v rustc &> /dev/null; then
+        # Redireciona a saída da instalação do Rustup
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1 || error_exit "Falha ao instalar Rust"
-        # Importante: Source o ambiente do Cargo para que `cargo build` funcione no script
         source "/root/.cargo/env" || error_exit "Falha ao carregar o ambiente Rust. Verifique a instalação do Rust."
     else
         echo "Rust já está instalado."
@@ -96,24 +98,20 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     # ---->>>> Instalar o RustyProxy
     show_progress "CLONANDO E COMPILANDO RUSTYPROXY, ISSO PODE LEVAR UM TEMPO, AGUARDE..."
 
-    # Garante que o diretório de clone está limpo
     if [ -d "/root/RustyProxyOnly" ]; then
         rm -rf /root/RustyProxyOnly || error_exit "Falha ao remover diretório antigo de clone"
     fi
 
-    # Clona o repositório
+    # Redireciona a saída do git clone
     git clone --branch "main" https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar o repositório RustyProxyOnly"
     
-    # Move o menu.sh para o diretório de instalação
     mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu || error_exit "Falha ao mover o script de menu"
     
-    # Navega para o diretório do projeto Rust e compila
     cd /root/RustyProxyOnly/RustyProxy || error_exit "Diretório do projeto Rust não encontrado"
     
-    # *** LINHA MODIFICADA PARA EXIBIR ERROS DE COMPILAÇÃO ***
-    cargo build --release --jobs $(nproc) || error_exit "Falha ao compilar o RustyProxy. Verifique o output acima para detalhes."
+    # Redireciona a saída da compilação do Cargo
+    cargo build --release --jobs $(nproc) > /dev/null 2>&1 || error_exit "Falha ao compilar o RustyProxy. Verifique logs em caso de erro."
     
-    # Move o executável compilado
     mv ./target/release/RustyProxy /opt/rustyproxy/proxy || error_exit "Falha ao mover o executável compilado"
     increment_step
 
