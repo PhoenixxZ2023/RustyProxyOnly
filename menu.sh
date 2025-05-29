@@ -1,13 +1,12 @@
 #!/bin/bash
-# STUNNEL MANAGER
+# RUSTYPROXY MANAGER
 
 PORTS_FILE="/opt/rustyproxy/ports"
 STUNNEL_CONF_DIR="/etc/stunnel"
 STUNNEL_SERVICE_FILE="/etc/systemd/system/stunnel_custom.service"
 STUNNEL_CONFIG_FILE="$STUNNEL_CONF_DIR/stunnel_service.conf"
-STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_full.cert.pem" # <--- ATENÇÃO: Nome final do certificado
+STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem"
 STUNNEL_KEY_FILE="$STUNNEL_CONF_DIR/key.pem"
-STUNNEL_ORIGINAL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem" # <--- NOVO: Para o cert temporário
 STUNNEL_LOG_FILE="/var/log/stunnel4/stunnel_custom.log"
 STUNNEL_STATUS_FILE="/opt/stunnel_status.txt"
 
@@ -19,11 +18,11 @@ WHITE_BG='\033[40;1;37m'
 RESET='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then
-  echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
-  exit 1
+    echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
+    exit 1
 fi
 
-# Função auxiliar para validar portas
+# Função auxiliar para validar portas (mantida)
 validate_port() {
     local port=$1
     if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
@@ -35,17 +34,20 @@ validate_port() {
 
 # --- Funções originais do RustyProxy (mantidas inalteradas) ---
 add_proxy_port() {
-    local port=$1
-    local status=${2:-"RUSTY PROXY"}
+    local port=$1
+    local status=${2:-"RUSTY PROXY"}
 
-    if is_port_in_use "$port"; then
-        echo -e "${RED}⛔️ A PORTA $port JÁ ESTÁ EM USO.${RESET}"
-        return
-    fi
+    if is_port_in_use "$port"; then
+        echo -e "${RED}⛔️ A PORTA $port JÁ ESTÁ EM USO.${RESET}"
+        return
+    fi
 
-    local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
-    local service_file_content="[Unit]
+    # ESTA LINHA PERMANECE COMO NO SEU ORIGINAL: APENAS --port E --status
+    # Isso significa que o RustyProxy usará as portas de backend padrão (SSH, OpenVPN, WS, Stunnel)
+    # que estão hardcoded no main.rs, a menos que você as mude manualmente no main.rs.
+    local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
+    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local service_file_content="[Unit]
 Description=RustyProxy ${port}
 After=network.target
 
@@ -58,85 +60,91 @@ Restart=always
 [Install]
 WantedBy=multi-user.target"
 
-    echo "$service_file_content" > "$service_file_path"
-    systemctl daemon-reload
-    systemctl enable "proxy${port}.service"
-    systemctl start "proxy${port}.service"
+    echo "$service_file_content" > "$service_file_path"
+    systemctl daemon-reload
+    systemctl enable "proxy${port}.service"
+    systemctl start "proxy${port}.service"
 
-    echo "$port" >> "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
+    echo "$port" >> "$PORTS_FILE"
+    echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
 }
 
 is_port_in_use() {
-    local port=$1
-    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
-        return 0
-    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
-        return 0
-    elif lsof -i :"$port" 2>/dev/null | grep -q LISTEN; then
-        return 0
-    else
-        return 1
-    fi
+    local port=$1
+    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+        return 0
+    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+        return 0
+    elif lsof -i :"$port" 2>/dev/null | grep -q LISTEN; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 del_proxy_port() {
-    local port=$1
+    local port=$1
 
-    systemctl disable "proxy${port}.service" 2>/dev/null
-    systemctl stop "proxy${port}.service" 2>/dev/null
-    rm -f "/etc/systemd/system/proxy${port}.service"
-    systemctl daemon-reload
+    systemctl disable "proxy${port}.service" 2>/dev/null
+    systemctl stop "proxy${port}.service" 2>/dev/null
+    rm -f "/etc/systemd/system/proxy${port}.service"
+    systemctl daemon-reload
 
-    if lsof -i :"$port" &>/dev/null; then
-        fuser -k "$port"/tcp 2>/dev/null
-    fi
+    if lsof -i :"$port" &>/dev/null; then
+        fuser -k "$port"/tcp 2>/dev/null
+    fi
 
-    sed -i "/^$port|/d" "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
+    sed -i "/^$port|/d" "$PORTS_FILE"
+    echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
 }
 
 update_proxy_status() {
-    local port=$1
-    local new_status=$2
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local port=$1
+    local new_status=$2
+    local service_file_path="/etc/systemd/system/proxy${port}.service"
 
-    if ! is_port_in_use "$port"; then
-        echo -e "${YELLOW}⚠️ A PORTA $port NÃO ESTÁ ATIVA.${RESET}"
-        return
-    fi
+    if ! is_port_in_use "$port"; then
+        echo -e "${YELLOW}⚠️ A PORTA $port NÃO ESTÁ ATIVA.${RESET}"
+        return
+    fi
 
-    if [ ! -f "$service_file_path" ]; then
-        echo -e "${RED}ARQUIVO DE SERVIÇO PARA $port NÃO ENCONTRADO.${RESET}"
-        return
-    fi
+    if [ ! -f "$service_file_path" ]; then
+        echo -e "${RED}ARQUIVO DE SERVIÇO PARA $port NÃO ENCONTRADO.${RESET}"
+        return
+    fi
 
-    local new_command="/opt/rustyproxy/proxy --port $port --status \"$new_status\""
-    sed -i "s|^ExecStart=.*$|ExecStart=${new_command}|" "$service_file_path"
+    local new_command="/opt/rustyproxy/proxy --port $port --status \"$new_status\""
+    sed -i "s|^ExecStart=.*$|ExecStart=${new_command}|" "$service_file_path"
 
-    systemctl daemon-reload
-    systemctl restart "proxy${port}.service"
+    systemctl daemon-reload
+    systemctl restart "proxy${port}.service"
 
-    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '$new_status'. (Verifique o arquivo de serviço para detalhes).${RESET}"
-    sleep 2
+    # O PORTS_FILE original só guarda a porta, não o status associado
+    # Então, para atualizar o status, precisaríamos relê-lo ou ter outra forma de persistência
+    # Como o original não guardava status, esta parte é um pouco complexa de manter 100% fiel
+    # sem mudar o formato do PORTS_FILE. Por agora, vamos manter o update básico.
+    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '$new_status'. (Verifique o arquivo de serviço para detalhes).${RESET}"
+    sleep 2
 }
 
 restart_all_proxies() {
-    if [ ! -s "$PORTS_FILE" ]; then
-        echo "NENHUMA PORTA ENCONTRADA PARA REINICIAR."
-        return
-    fi
+    if [ ! -s "$PORTS_FILE" ]; then
+        echo "NENHUMA PORTA ENCONTRADA PARA REINICIAR."
+        return
+    fi
 
-    echo "🔃 REINICIANDO TODAS AS PORTAS DO PROXY..."
-    sleep 2
+    echo "🔃 REINICIANDO TODAS AS PORTAS DO PROXY..."
+    sleep 2
 
-    while IFS='|' read -r port status; do
-        del_proxy_port "$port"
-        add_proxy_port "$port" "$status"
-    done < "$PORTS_FILE"
+    # Este loop depende que PORTS_FILE contenha apenas a porta, como no seu original
+    while IFS='|' read -r port status; do # O 'status' aqui leria a parte após '|' se existisse
+        del_proxy_port "$port" # Desativa e remove o serviço antigo
+        # Reativa com o status original (se o PORTS_FILE o tivesse salvo, senão usa padrão)
+        add_proxy_port "$port" "$status" # Passa o status, que pode ser vazio
+    done < "$PORTS_FILE"
 
-    echo -e "${GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.${RESET}"
-    sleep 2
+    echo -e "${GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.${RESET}"
+    sleep 2
 }
 
 # --- NOVAS Funções para o Stunnel Autônomo ---
@@ -496,7 +504,7 @@ show_menu() {
             read -n 1 -s -r
             ;;
     esac
-}
+done
 
 [ ! -f "$PORTS_FILE" ] && touch "$PORTS_FILE" # Garante que o arquivo de portas do RustyProxy exista
 [ ! -f "$STUNNEL_STATUS_FILE" ] && touch "$STUNNEL_STATUS_FILE" # Garante que o arquivo de status do Stunnel exista
