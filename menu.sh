@@ -5,11 +5,10 @@ PORTS_FILE="/opt/rustyproxy/ports"
 STUNNEL_CONF_DIR="/etc/stunnel"
 STUNNEL_SERVICE_FILE="/etc/systemd/system/stunnel_custom.service"
 STUNNEL_CONFIG_FILE="$STUNNEL_CONF_DIR/stunnel_service.conf"
-STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem" # O arquivo final com chave e certificado
-STUNNEL_KEY_FILE="$STUNNEL_CONF_DIR/key.pem" # Apenas a chave privada
-STUNNEL_ORIGINAL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert_temp.pem" # Certificado temporário
+STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem"
+STUNNEL_KEY_FILE="$STUNNEL_CONF_DIR/key.pem"
 STUNNEL_LOG_FILE="/var/log/stunnel4/stunnel_custom.log"
-STUNNEL_STATUS_FILE="/opt/stunnel_status.txt" # Para salvar a configuração atual do stunnel autônomo
+STUNNEL_STATUS_FILE="/opt/stunnel_status.txt"
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -33,7 +32,7 @@ validate_port() {
     return 0
 }
 
-# --- Funções originais do RustyProxy (MANTIDAS INALTERADAS) ---
+# --- Funções originais do RustyProxy (mantidas inalteradas) ---
 add_proxy_port() {
     local port=$1
     local status=${2:-"RUSTY PROXY"}
@@ -44,8 +43,6 @@ add_proxy_port() {
     fi
 
     # O comando ExecStart permanece como no seu original: apenas --port e --status
-    # Isso significa que o RustyProxy usará as portas de backend padrão (SSH, OpenVPN, WS, Stunnel)
-    # que estão hardcoded no main.rs, a menos que você as mude manualmente no main.rs.
     local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
     local service_file_path="/etc/systemd/system/proxy${port}.service"
     local service_file_content="[Unit]
@@ -165,26 +162,16 @@ install_stunnel() {
 
 # Cria o certificado para o stunnel (com chaves)
 create_stunnel_cert() {
-    # Remove qualquer certificado temporário anterior antes de gerar um novo
-    rm -f "$STUNNEL_ORIGINAL_CERT_FILE" "$STUNNEL_KEY_FILE"
-    
-    if [ ! -f "$STUNNEL_CERT_FILE" ]; then # Verifica se o certificado final já existe
+    if [ ! -f "$STUNNEL_CERT_FILE" ]; then
         echo -e "${YELLOW}Gerando certificado SSL/TLS para stunnel...${NC}"
         mkdir -p "$STUNNEL_CONF_DIR" || { echo -e "${RED}Erro: Falha ao criar diretório $STUNNEL_CONF_DIR.${NC}"; return 1; }
-        
-        # Gera a chave privada
         openssl genrsa -out "$STUNNEL_KEY_FILE" 2048 || { echo -e "${RED}Erro: Falha ao gerar chave privada.${NC}"; return 1; }
-        
-        # Gera o certificado, usando STUNNEL_ORIGINAL_CERT_FILE como saída temporária
-        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "$STUNNEL_ORIGINAL_CERT_FILE" -days 365 -nodes \
+        # Pode ajustar o CN (Common Name) para o seu domínio real, se tiver um
+        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "$STUNNEL_CERT_FILE" -days 365 -nodes \
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=StunnelOrg/OU=IT/CN=your_server_ip_or_domain.com" > /dev/null 2>&1 || { echo -e "${RED}Erro: Falha ao gerar certificado autoassinado. Verifique openssl.${NC}"; return 1; }
         
-        # Concatena a chave e o certificado TEMPORÁRIO no arquivo de certificado FINAL
-        cat "$STUNNEL_KEY_FILE" "$STUNNEL_ORIGINAL_CERT_FILE" > "$STUNNEL_CERT_FILE" || { echo -e "${RED}Erro: Falha ao concatenar chave e certificado no arquivo final.${NC}"; return 1; }
-        
-        # Remove o certificado temporário
-        rm -f "$STUNNEL_ORIGINAL_CERT_FILE"
-        
+        # Concatena a chave e o certificado para o arquivo .pem que o stunnel espera
+        cat "$STUNNEL_KEY_FILE" "$STUNNEL_CERT_FILE" > "$STUNNEL_CERT_FILE" || { echo -e "${RED}Erro: Falha ao concatenar chave e certificado.${NC}"; return 1; }
         echo -e "${GREEN}Certificado autoassinado gerado em $STUNNEL_CERT_FILE${NC}"
     else
         echo -e "${GREEN}Certificado SSL/TLS já existe em $STUNNEL_CERT_FILE${NC}"
@@ -313,9 +300,8 @@ uninstall_rustyproxy() { # Nome original, mas agora desinstala o Stunnel também
         rm "$STUNNEL_SERVICE_FILE"
         systemctl daemon-reload
     fi
-    # ATENÇÃO: Adicionei um check para remover a pasta de config apenas se estiver vazia ou após parar
-    if [ -d "$STUNNEL_CONF_DIR" ]; then 
-        rm -rf "$STUNNEL_CONF_DIR" # Remove a pasta de configuração completa
+    if [ -d "$STUNNEL_CONF_DIR" ]; then # Remove a pasta de configuração completa
+        rm -rf "$STUNNEL_CONF_DIR"
     fi
     if [ -f "$STUNNEL_STATUS_FILE" ]; then
         rm "$STUNNEL_STATUS_FILE"
@@ -394,9 +380,9 @@ show_menu() {
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m05\033[1;31m] \033[1;37m◉ \033[1;33mDESINSTALAR RustyProxy & Stunnel  \033[1;36m┃\033[0m" # Texto ajustado
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m06\033[1;31m] \033[1;37m◉ \033[1;33mATIVAR/CONFIGURAR Stunnel Autônomo\033[1;36m┃\033[0m"
-    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m07\033[1;31m] \033[1;33mDESATIVAR Stunnel Autônomo        \033[1;36m┃\033[0m"
-    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m08\033[1;31m] \033[1;33mREINICIAR Stunnel Autônomo        \033[1;36m┃\033[0m"
-    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m09\033[1;31m] \033[1;33mVer Logs do Stunnel Autônomo      \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m07\033[1;31m] \033[1;37m◉ \033[1;33mDESATIVAR Stunnel Autônomo        \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m08\033[1;31m] \033[1;37m◉ \033[1;33mREINICIAR Stunnel Autônomo        \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m09\033[1;31m] \033[1;37m◉ \033[1;33mVer Logs do Stunnel Autônomo      \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m00\033[1;31m] \033[1;37m◉ \033[1;33mSAIR DO MENU                      \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m"
@@ -505,7 +491,7 @@ show_menu() {
             read -n 1 -s -r
             ;;
     esac
-done
+}
 
 [ ! -f "$PORTS_FILE" ] && touch "$PORTS_FILE" # Garante que o arquivo de portas do RustyProxy exista
 [ ! -f "$STUNNEL_STATUS_FILE" ] && touch "$STUNNEL_STATUS_FILE" # Garante que o arquivo de status do Stunnel exista
