@@ -1,12 +1,13 @@
 #!/bin/bash
-# RUSTYPROXY MANAGER
+# STUNNEL MANAGER
 
 PORTS_FILE="/opt/rustyproxy/ports"
 STUNNEL_CONF_DIR="/etc/stunnel"
 STUNNEL_SERVICE_FILE="/etc/systemd/system/stunnel_custom.service"
 STUNNEL_CONFIG_FILE="$STUNNEL_CONF_DIR/stunnel_service.conf"
-STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem"
+STUNNEL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_full.cert.pem" # <--- ATENÇÃO: Nome final do certificado
 STUNNEL_KEY_FILE="$STUNNEL_CONF_DIR/key.pem"
+STUNNEL_ORIGINAL_CERT_FILE="$STUNNEL_CONF_DIR/stunnel_cert.pem" # <--- NOVO: Para o cert temporário
 STUNNEL_LOG_FILE="/var/log/stunnel4/stunnel_custom.log"
 STUNNEL_STATUS_FILE="/opt/stunnel_status.txt"
 
@@ -18,8 +19,8 @@ WHITE_BG='\033[40;1;37m'
 RESET='\033[0m'
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
-    exit 1
+  echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
+  exit 1
 fi
 
 # Função auxiliar para validar portas
@@ -34,18 +35,17 @@ validate_port() {
 
 # --- Funções originais do RustyProxy (mantidas inalteradas) ---
 add_proxy_port() {
-    local port=$1
-    local status=${2:-"RUSTY PROXY"}
+    local port=$1
+    local status=${2:-"RUSTY PROXY"}
 
-    if is_port_in_use "$port"; then
-        echo -e "${RED}⛔️ A PORTA $port JÁ ESTÁ EM USO.${RESET}"
-        return
-    fi
+    if is_port_in_use "$port"; then
+        echo -e "${RED}⛔️ A PORTA $port JÁ ESTÁ EM USO.${RESET}"
+        return
+    fi
 
-    # O comando ExecStart permanece como no seu original: apenas --port e --status
-    local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
-    local service_file_content="[Unit]
+    local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
+    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local service_file_content="[Unit]
 Description=RustyProxy ${port}
 After=network.target
 
@@ -58,91 +58,85 @@ Restart=always
 [Install]
 WantedBy=multi-user.target"
 
-    echo "$service_file_content" > "$service_file_path"
-    systemctl daemon-reload
-    systemctl enable "proxy${port}.service"
-    systemctl start "proxy${port}.service"
+    echo "$service_file_content" > "$service_file_path"
+    systemctl daemon-reload
+    systemctl enable "proxy${port}.service"
+    systemctl start "proxy${port}.service"
 
-    echo "$port" >> "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
+    echo "$port" >> "$PORTS_FILE"
+    echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
 }
 
 is_port_in_use() {
-    local port=$1
-    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
-        return 0
-    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
-        return 0
-    elif lsof -i :"$port" 2>/dev/null | grep -q LISTEN; then
-        return 0
-    else
-        return 1
-    fi
+    local port=$1
+    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+        return 0
+    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+        return 0
+    elif lsof -i :"$port" 2>/dev/null | grep -q LISTEN; then
+        return 0
+    else
+        return 1
+    fi
 }
 
 del_proxy_port() {
-    local port=$1
+    local port=$1
 
-    systemctl disable "proxy${port}.service" 2>/dev/null
-    systemctl stop "proxy${port}.service" 2>/dev/null
-    rm -f "/etc/systemd/system/proxy${port}.service"
-    systemctl daemon-reload
+    systemctl disable "proxy${port}.service" 2>/dev/null
+    systemctl stop "proxy${port}.service" 2>/dev/null
+    rm -f "/etc/systemd/system/proxy${port}.service"
+    systemctl daemon-reload
 
-    if lsof -i :"$port" &>/dev/null; then
-        fuser -k "$port"/tcp 2>/dev/null
-    fi
+    if lsof -i :"$port" &>/dev/null; then
+        fuser -k "$port"/tcp 2>/dev/null
+    fi
 
-    sed -i "/^$port|/d" "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
+    sed -i "/^$port|/d" "$PORTS_FILE"
+    echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
 }
 
 update_proxy_status() {
-    local port=$1
-    local new_status=$2
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local port=$1
+    local new_status=$2
+    local service_file_path="/etc/systemd/system/proxy${port}.service"
 
-    if ! is_port_in_use "$port"; then
-        echo -e "${YELLOW}⚠️ A PORTA $port NÃO ESTÁ ATIVA.${RESET}"
-        return
-    fi
+    if ! is_port_in_use "$port"; then
+        echo -e "${YELLOW}⚠️ A PORTA $port NÃO ESTÁ ATIVA.${RESET}"
+        return
+    fi
 
-    if [ ! -f "$service_file_path" ]; then
-        echo -e "${RED}ARQUIVO DE SERVIÇO PARA $port NÃO ENCONTRADO.${RESET}"
-        return
-    fi
+    if [ ! -f "$service_file_path" ]; then
+        echo -e "${RED}ARQUIVO DE SERVIÇO PARA $port NÃO ENCONTRADO.${RESET}"
+        return
+    fi
 
-    local new_command="/opt/rustyproxy/proxy --port $port --status \"$new_status\""
-    sed -i "s|^ExecStart=.*$|ExecStart=${new_command}|" "$service_file_path"
+    local new_command="/opt/rustyproxy/proxy --port $port --status \"$new_status\""
+    sed -i "s|^ExecStart=.*$|ExecStart=${new_command}|" "$service_file_path"
 
-    systemctl daemon-reload
-    systemctl restart "proxy${port}.service"
+    systemctl daemon-reload
+    systemctl restart "proxy${port}.service"
 
-    # O PORTS_FILE original só guarda a porta, não o status associado
-    # Então, para atualizar o status, precisaríamos relê-lo ou ter outra forma de persistência
-    # Como o original não guardava status, esta parte é um pouco complexa de manter 100% fiel
-    # sem mudar o formato do PORTS_FILE. Por agora, vamos manter o update básico.
-    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '$new_status'. (Verifique o arquivo de serviço para detalhes).${RESET}"
-    sleep 2
+    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '$new_status'. (Verifique o arquivo de serviço para detalhes).${RESET}"
+    sleep 2
 }
 
 restart_all_proxies() {
-    if [ ! -s "$PORTS_FILE" ]; then
-        echo "NENHUMA PORTA ENCONTRADA PARA REINICIAR."
-        return
-    fi
+    if [ ! -s "$PORTS_FILE" ]; then
+        echo "NENHUMA PORTA ENCONTRADA PARA REINICIAR."
+        return
+    fi
 
-    echo "🔃 REINICIANDO TODAS AS PORTAS DO PROXY..."
-    sleep 2
+    echo "🔃 REINICIANDO TODAS AS PORTAS DO PROXY..."
+    sleep 2
 
-    # Este loop depende que PORTS_FILE contenha apenas a porta, como no seu original
-    while IFS='|' read -r port status; do # O 'status' aqui leria a parte após '|' se existisse
-        del_proxy_port "$port" # Desativa e remove o serviço antigo
-        # Reativa com o status original (se o PORTS_FILE o tivesse salvo, senão usa padrão)
-        add_proxy_port "$port" "$status" # Passa o status, que pode ser vazio
-    done < "$PORTS_FILE"
+    while IFS='|' read -r port status; do
+        del_proxy_port "$port"
+        add_proxy_port "$port" "$status"
+    done < "$PORTS_FILE"
 
-    echo -e "${GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.${RESET}"
-    sleep 2
+    echo -e "${GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.${RESET}"
+    sleep 2
 }
 
 # --- NOVAS Funções para o Stunnel Autônomo ---
@@ -162,16 +156,26 @@ install_stunnel() {
 
 # Cria o certificado para o stunnel (com chaves)
 create_stunnel_cert() {
-    if [ ! -f "$STUNNEL_CERT_FILE" ]; then
+    # Remove qualquer certificado temporário anterior antes de gerar um novo
+    rm -f "$STUNNEL_ORIGINAL_CERT_FILE" "$STUNNEL_KEY_FILE"
+    
+    if [ ! -f "$STUNNEL_CERT_FILE" ]; then # Verifica se o certificado final já existe
         echo -e "${YELLOW}Gerando certificado SSL/TLS para stunnel...${NC}"
         mkdir -p "$STUNNEL_CONF_DIR" || { echo -e "${RED}Erro: Falha ao criar diretório $STUNNEL_CONF_DIR.${NC}"; return 1; }
+        
+        # Gera a chave privada
         openssl genrsa -out "$STUNNEL_KEY_FILE" 2048 || { echo -e "${RED}Erro: Falha ao gerar chave privada.${NC}"; return 1; }
-        # Pode ajustar o CN (Common Name) para o seu domínio real, se tiver um
-        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "$STUNNEL_CERT_FILE" -days 365 -nodes \
+        
+        # Gera o certificado, usando STUNNEL_ORIGINAL_CERT_FILE como saída temporária
+        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "$STUNNEL_ORIGINAL_CERT_FILE" -days 365 -nodes \
             -subj "/C=BR/ST=SP/L=SaoPaulo/O=StunnelOrg/OU=IT/CN=your_server_ip_or_domain.com" > /dev/null 2>&1 || { echo -e "${RED}Erro: Falha ao gerar certificado autoassinado. Verifique openssl.${NC}"; return 1; }
         
-        # Concatena a chave e o certificado para o arquivo .pem que o stunnel espera
-        cat "$STUNNEL_KEY_FILE" "$STUNNEL_CERT_FILE" > "$STUNNEL_CERT_FILE" || { echo -e "${RED}Erro: Falha ao concatenar chave e certificado.${NC}"; return 1; }
+        # Concatena a chave e o certificado TEMPORÁRIO no arquivo de certificado FINAL
+        cat "$STUNNEL_KEY_FILE" "$STUNNEL_ORIGINAL_CERT_FILE" > "$STUNNEL_CERT_FILE" || { echo -e "${RED}Erro: Falha ao concatenar chave e certificado no arquivo final.${NC}"; return 1; }
+        
+        # Remove o certificado temporário
+        rm -f "$STUNNEL_ORIGINAL_CERT_FILE"
+        
         echo -e "${GREEN}Certificado autoassinado gerado em $STUNNEL_CERT_FILE${NC}"
     else
         echo -e "${GREEN}Certificado SSL/TLS já existe em $STUNNEL_CERT_FILE${NC}"
@@ -300,8 +304,9 @@ uninstall_rustyproxy() { # Nome original, mas agora desinstala o Stunnel também
         rm "$STUNNEL_SERVICE_FILE"
         systemctl daemon-reload
     fi
-    if [ -d "$STUNNEL_CONF_DIR" ]; then # Remove a pasta de configuração completa
-        rm -rf "$STUNNEL_CONF_DIR"
+    # ATENÇÃO: Adicionei um check para remover a pasta de config apenas se estiver vazia ou após parar
+    if [ -d "$STUNNEL_CONF_DIR" ]; then 
+        rm -rf "$STUNNEL_CONF_DIR" # Remove a pasta de configuração completa
     fi
     if [ -f "$STUNNEL_STATUS_FILE" ]; then
         rm "$STUNNEL_STATUS_FILE"
