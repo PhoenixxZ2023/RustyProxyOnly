@@ -17,16 +17,16 @@ BLUE='\033[0;34m'
 WHITE_BG='\033[40;1;37m'
 RESET='\033[0m'
 
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Por favor, execute este script como root ou com sudo.${RESET}"
+if [ "<span class="math-inline">EUID" \-ne 0 \]; then
+echo \-e "</span>{RED}Por favor, execute este script como root ou com sudo.${RESET}"
     exit 1
 fi
 
 # Função auxiliar para validar portas (mantida)
 validate_port() {
     local port=$1
-    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
-        echo -e "${RED}Porta inválida. Por favor, digite um número entre 1 e 65535.${RESET}"
+    if ! [[ "<span class="math-inline">port" \=\~ ^\[0\-9\]\+</span> ]] || [ "$port" -lt 1 ] || [ "<span class="math-inline">port" \-gt 65535 \]; then
+echo \-e "</span>{RED}Porta inválida. Por favor, digite um número entre 1 e 65535.${RESET}"
         return 1
     fi
     return 0
@@ -34,46 +34,45 @@ validate_port() {
 
 # --- Funções originais do RustyProxy (mantidas inalteradas) ---
 add_proxy_port() {
-    local port=$1
-    local status=${2:-"RUSTY PROXY"}
+    local port=<span class="math-inline">1
+local status\=</span>{2:-"RUSTY PROXY"}
 
-    if is_port_in_use "$port"; then
-        echo -e "${RED}⛔️ A PORTA $port JÁ ESTÁ EM USO.${RESET}"
+    if is_port_in_use "<span class="math-inline">port"; then
+echo \-e "</span>{RED}⛔️ A PORTA <span class="math-inline">port JÁ ESTÁ EM USO\.</span>{RESET}"
         return
     fi
 
-    # ESTA LINHA PERMANECE COMO NO SEU ORIGINAL: APENAS --port E --status
+    # O comando ExecStart permanece como no seu original: apenas --port e --status
     # Isso significa que o RustyProxy usará as portas de backend padrão (SSH, OpenVPN, WS, Stunnel)
     # que estão hardcoded no main.rs, a menos que você as mude manualmente no main.rs.
-    local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local command="/opt/rustyproxy/proxy --port $port --status \"<span class="math-inline">status\\""
+local service\_file\_path\="/etc/systemd/system/proxy</span>{port}.service"
     local service_file_content="[Unit]
-Description=RustyProxy ${port}
-After=network.target
-
-[Service]
-LimitNOFILE=infinity
-Type=simple
-ExecStart=${command}
+Description=RustyProxy <span class="math-inline">\{port\}
+After\=network\.target
+\[Service\]
+LimitNOFILE\=infinity
+Type\=simple
+ExecStart\=</span>{command}
 Restart=always
 
 [Install]
 WantedBy=multi-user.target"
 
-    echo "$service_file_content" > "$service_file_path"
-    systemctl daemon-reload
-    systemctl enable "proxy${port}.service"
+    echo "$service_file_content" > "<span class="math-inline">service\_file\_path"
+systemctl daemon\-reload
+systemctl enable "proxy</span>{port}.service"
     systemctl start "proxy${port}.service"
 
-    echo "$port" >> "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port ABERTA COM SUCESSO.${RESET}"
+    echo "$port" >> "<span class="math-inline">PORTS\_FILE"
+echo \-e "</span>{GREEN}✅ PORTA <span class="math-inline">port ABERTA COM SUCESSO\.</span>{RESET}"
 }
 
 is_port_in_use() {
     local port=$1
-    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+    if netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":<span class="math-inline">port</span>"; then
         return 0
-    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$port$"; then
+    elif ss -tuln 2>/dev/null | awk '{print $4}' | grep -q ":<span class="math-inline">port</span>"; then
         return 0
     elif lsof -i :"$port" 2>/dev/null | grep -q LISTEN; then
         return 0
@@ -83,9 +82,8 @@ is_port_in_use() {
 }
 
 del_proxy_port() {
-    local port=$1
-
-    systemctl disable "proxy${port}.service" 2>/dev/null
+    local port=<span class="math-inline">1
+systemctl disable "proxy</span>{port}.service" 2>/dev/null
     systemctl stop "proxy${port}.service" 2>/dev/null
     rm -f "/etc/systemd/system/proxy${port}.service"
     systemctl daemon-reload
@@ -94,36 +92,35 @@ del_proxy_port() {
         fuser -k "$port"/tcp 2>/dev/null
     fi
 
-    sed -i "/^$port|/d" "$PORTS_FILE"
-    echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
+    sed -i "/^$port|/d" "<span class="math-inline">PORTS\_FILE"
+echo \-e "</span>{GREEN}✅ PORTA <span class="math-inline">port FECHADA COM SUCESSO\.</span>{RESET}"
 }
 
 update_proxy_status() {
     local port=$1
-    local new_status=$2
-    local service_file_path="/etc/systemd/system/proxy${port}.service"
+    local new_status=<span class="math-inline">2
+local service\_file\_path\="/etc/systemd/system/proxy</span>{port}.service"
 
-    if ! is_port_in_use "$port"; then
-        echo -e "${YELLOW}⚠️ A PORTA $port NÃO ESTÁ ATIVA.${RESET}"
+    if ! is_port_in_use "<span class="math-inline">port"; then
+echo \-e "</span>{YELLOW}⚠️ A PORTA <span class="math-inline">port NÃO ESTÁ ATIVA\.</span>{RESET}"
         return
     fi
 
-    if [ ! -f "$service_file_path" ]; then
-        echo -e "${RED}ARQUIVO DE SERVIÇO PARA $port NÃO ENCONTRADO.${RESET}"
+    if [ ! -f "<span class="math-inline">service\_file\_path" \]; then
+echo \-e "</span>{RED}ARQUIVO DE SERVIÇO PARA <span class="math-inline">port NÃO ENCONTRADO\.</span>{RESET}"
         return
     fi
 
-    local new_command="/opt/rustyproxy/proxy --port $port --status \"$new_status\""
-    sed -i "s|^ExecStart=.*$|ExecStart=${new_command}|" "$service_file_path"
-
-    systemctl daemon-reload
-    systemctl restart "proxy${port}.service"
+    local new_command="/opt/rustyproxy/proxy --port $port --status \"<span class="math-inline">new\_status\\""
+sed \-i "s\|^ExecStart\=\.\*</span>|ExecStart=${new_command}|" "<span class="math-inline">service\_file\_path"
+systemctl daemon\-reload
+systemctl restart "proxy</span>{port}.service"
 
     # O PORTS_FILE original só guarda a porta, não o status associado
     # Então, para atualizar o status, precisaríamos relê-lo ou ter outra forma de persistência
     # Como o original não guardava status, esta parte é um pouco complexa de manter 100% fiel
     # sem mudar o formato do PORTS_FILE. Por agora, vamos manter o update básico.
-    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '$new_status'. (Verifique o arquivo de serviço para detalhes).${RESET}"
+    echo -e "${YELLOW}🔃 STATUS DA PORTA $port ATUALIZADO PARA '<span class="math-inline">new\_status'\. \(Verifique o arquivo de serviço para detalhes\)\.</span>{RESET}"
     sleep 2
 }
 
@@ -141,23 +138,20 @@ restart_all_proxies() {
         del_proxy_port "$port" # Desativa e remove o serviço antigo
         # Reativa com o status original (se o PORTS_FILE o tivesse salvo, senão usa padrão)
         add_proxy_port "$port" "$status" # Passa o status, que pode ser vazio
-    done < "$PORTS_FILE"
-
-    echo -e "${GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.${RESET}"
-    sleep 2
-}
-
-# --- NOVAS Funções para o Stunnel Autônomo ---
-
-# Instala o stunnel4
-install_stunnel() {
-    if ! command -v stunnel4 &> /dev/null; then
-        echo -e "${YELLOW}Instalando stunnel4...${NC}"
-        apt update > /dev/null 2>&1
-        apt install stunnel4 -y > /dev/null 2>&1 || { echo -e "${RED}Erro: Falha ao instalar stunnel4.${NC}"; return 1; }
-        echo -e "${GREEN}stunnel4 instalado com sucesso.${NC}"
-    else
-        echo -e "${GREEN}stunnel4 já está instalado.${NC}"
+    done < "<span class="math-inline">PORTS\_FILE"
+echo \-e "</span>{GREEN}✅ TODAS AS PORTAS FORAM REINICIADAS COM SUCESSO.<span class="math-inline">\{RESET\}"
+sleep 2
+\}
+\# \-\-\- NOVAS Funções para o Stunnel Autônomo \-\-\-
+\# Instala o stunnel4
+install\_stunnel\(\) \{
+if \! command \-v stunnel4 &\> /dev/null; then
+echo \-e "</span>{YELLOW}Instalando stunnel4...<span class="math-inline">\{NC\}"
+apt update \> /dev/null 2\>&1
+apt install stunnel4 \-y \> /dev/null 2\>&1 \|\| \{ echo \-e "</span>{RED}Erro: Falha ao instalar stunnel4.<span class="math-inline">\{NC\}"; return 1; \}
+echo \-e "</span>{GREEN}stunnel4 instalado com sucesso.<span class="math-inline">\{NC\}"
+else
+echo \-e "</span>{GREEN}stunnel4 já está instalado.${NC}"
     fi
     return 0
 }
@@ -167,26 +161,25 @@ create_stunnel_cert() {
     # Remove qualquer certificado temporário anterior antes de gerar um novo
     rm -f "$STUNNEL_ORIGINAL_CERT_FILE" "$STUNNEL_KEY_FILE"
     
-    if [ ! -f "$STUNNEL_CERT_FILE" ]; then # Verifica se o certificado final já existe
-        echo -e "${YELLOW}Gerando certificado SSL/TLS para stunnel...${NC}"
-        mkdir -p "$STUNNEL_CONF_DIR" || { echo -e "${RED}Erro: Falha ao criar diretório $STUNNEL_CONF_DIR.${NC}"; return 1; }
+    if [ ! -f "<span class="math-inline">STUNNEL\_CERT\_FILE" \]; then \# Verifica se o certificado final já existe
+echo \-e "</span>{YELLOW}Gerando certificado SSL/TLS para stunnel...${NC}"
+        mkdir -p "<span class="math-inline">STUNNEL\_CONF\_DIR" \|\| \{ echo \-e "</span>{RED}Erro: Falha ao criar diretório <span class="math-inline">STUNNEL\_CONF\_DIR\.</span>{NC}"; return 1; }
         
         # Gera a chave privada
-        openssl genrsa -out "$STUNNEL_KEY_FILE" 2048 || { echo -e "${RED}Erro: Falha ao gerar chave privada.${NC}"; return 1; }
+        openssl genrsa -out "<span class="math-inline">STUNNEL\_KEY\_FILE" 2048 \|\| \{ echo \-e "</span>{RED}Erro: Falha ao gerar chave privada.${NC}"; return 1; }
         
         # Gera o certificado, usando STUNNEL_ORIGINAL_CERT_FILE como saída temporária
-        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "$STUNNEL_ORIGINAL_CERT_FILE" -days 365 -nodes \
-            -subj "/C=BR/ST=SP/L=SaoPaulo/O=StunnelOrg/OU=IT/CN=your_server_ip_or_domain.com" > /dev/null 2>&1 || { echo -e "${RED}Erro: Falha ao gerar certificado autoassinado. Verifique openssl.${NC}"; return 1; }
+        openssl req -new -x509 -key "$STUNNEL_KEY_FILE" -out "<span class="math-inline">STUNNEL\_ORIGINAL\_CERT\_FILE" \-days 365 \-nodes \\
+\-subj "/C\=BR/ST\=SP/L\=SaoPaulo/O\=StunnelOrg/OU\=IT/CN\=your\_server\_ip\_or\_domain\.com" \> /dev/null 2\>&1 \|\| \{ echo \-e "</span>{RED}Erro: Falha ao gerar certificado autoassinado. Verifique openssl.${NC}"; return 1; }
         
         # Concatena a chave e o certificado TEMPORÁRIO no arquivo de certificado FINAL
-        cat "$STUNNEL_KEY_FILE" "$STUNNEL_ORIGINAL_CERT_FILE" > "$STUNNEL_CERT_FILE" || { echo -e "${RED}Erro: Falha ao concatenar chave e certificado no arquivo final.${NC}"; return 1; }
+        cat "$STUNNEL_KEY_FILE" "$STUNNEL_ORIGINAL_CERT_FILE" > "<span class="math-inline">STUNNEL\_CERT\_FILE" \|\| \{ echo \-e "</span>{RED}Erro: Falha ao concatenar chave e certificado no arquivo final.${NC}"; return 1; }
         
         # Remove o certificado temporário
-        rm -f "$STUNNEL_ORIGINAL_CERT_FILE"
-        
-        echo -e "${GREEN}Certificado autoassinado gerado em $STUNNEL_CERT_FILE${NC}"
+        rm -f "<span class="math-inline">STUNNEL\_ORIGINAL\_CERT\_FILE"
+echo \-e "</span>{GREEN}Certificado autoassinado gerado em <span class="math-inline">STUNNEL\_CERT\_FILE</span>{NC}"
     else
-        echo -e "${GREEN}Certificado SSL/TLS já existe em $STUNNEL_CERT_FILE${NC}"
+        echo -e "${GREEN}Certificado SSL/TLS já existe em <span class="math-inline">STUNNEL\_CERT\_FILE</span>{NC}"
     fi
     return 0
 }
@@ -197,12 +190,12 @@ create_stunnel_config() {
     local connect_host=$2
     local connect_port=$3
 
-    if [ ! -f "$STUNNEL_CERT_FILE" ]; then
-        echo -e "${RED}Erro: Certificado SSL/TLS não encontrado em $STUNNEL_CERT_FILE. Gere-o primeiro.${NC}"
+    if [ ! -f "<span class="math-inline">STUNNEL\_CERT\_FILE" \]; then
+echo \-e "</span>{RED}Erro: Certificado SSL/TLS não encontrado em <span class="math-inline">STUNNEL\_CERT\_FILE\. Gere\-o primeiro\.</span>{NC}"
         return 1
     fi
 
-    echo -e "${YELLOW}Criando configuração para stunnel na porta ${listen_port}...${NC}"
+    echo -e "${YELLOW}Criando configuração para stunnel na porta <span class="math-inline">\{listen\_port\}\.\.\.</span>{NC}"
     mkdir -p /var/log/stunnel4 # Garante que o diretório de log exista
     cat <<EOF > "$STUNNEL_CONFIG_FILE"
 foreground = yes
@@ -210,15 +203,14 @@ setuid = root
 setgid = root
 pid = 
 debug = 7
-output = $STUNNEL_LOG_FILE
-
-[stunnel_proxy]
-accept = 0.0.0.0:${listen_port}
-connect = ${connect_host}:${connect_port}
-cert = ${STUNNEL_CERT_FILE}
-client = no
+output = <span class="math-inline">STUNNEL\_LOG\_FILE
+\[stunnel\_proxy\]
+accept \= 0\.0\.0\.0\:</span>{listen_port}
+connect = <span class="math-inline">\{connect\_host\}\:</span>{connect_port}
+cert = <span class="math-inline">\{STUNNEL\_CERT\_FILE\}
+client \= no
 EOF
-    echo -e "${GREEN}Configuração do stunnel criada em $STUNNEL_CONFIG_FILE${NC}"
+echo \-e "</span>{GREEN}Configuração do stunnel criada em <span class="math-inline">STUNNEL\_CONFIG\_FILE</span>{NC}"
     return 0
 }
 
@@ -232,70 +224,67 @@ start_stunnel_standalone_service() {
     create_stunnel_cert || return 1
 
     # Verifica se a porta já está em uso, mas ignora se for o próprio stunnel custom
-    if is_port_in_use "$listen_port"; then
-        if systemctl is-active stunnel_custom.service &>/dev/null && grep -q "accept = 0.0.0.0:${listen_port}" "$STUNNEL_CONFIG_FILE" &>/dev/null; then
-            echo -e "${YELLOW}Stunnel já está ativo na porta ${listen_port}. Reiniciando para aplicar configurações...${NC}"
-            systemctl restart stunnel_custom.service || { echo -e "${RED}Erro ao reiniciar stunnel_custom.service.${NC}"; return 1; }
-            echo "$listen_port|$connect_host|$connect_port" > "$STUNNEL_STATUS_FILE" # Salva a config
-            echo -e "${GREEN}✅ Stunnel reiniciado com sucesso na porta ${listen_port}.${NC}"
+    if is_port_in_use "<span class="math-inline">listen\_port"; then
+if systemctl is\-active stunnel\_custom\.service &\>/dev/null && grep \-q "accept \= 0\.0\.0\.0\:</span>{listen_port}" "<span class="math-inline">STUNNEL\_CONFIG\_FILE" &\>/dev/null; then
+echo \-e "</span>{YELLOW}Stunnel já está ativo na porta <span class="math-inline">\{listen\_port\}\. Reiniciando para aplicar configurações\.\.\.</span>{NC}"
+            systemctl restart stunnel_custom.service || { echo -e "<span class="math-inline">\{RED\}Erro ao reiniciar stunnel\_custom\.service\.</span>{NC}"; return 1; }
+            echo "$listen_port|$connect_host|$connect_port" > "<span class="math-inline">STUNNEL\_STATUS\_FILE" \# Salva a config
+echo \-e "</span>{GREEN}✅ Stunnel reiniciado com sucesso na porta <span class="math-inline">\{listen\_port\}\.</span>{NC}"
             return 0
         else
-            echo -e "${RED}⛔️ A PORTA $listen_port JÁ ESTÁ EM USO por outro serviço.${RESET}"
+            echo -e "${RED}⛔️ A PORTA <span class="math-inline">listen\_port JÁ ESTÁ EM USO por outro serviço\.</span>{RESET}"
             return 1
         fi
     fi
 
-    create_stunnel_config "$listen_port" "$connect_host" "$connect_port" || return 1
-
-    # Cria o serviço systemd personalizado para o stunnel
-    echo -e "${YELLOW}Criando serviço systemd para stunnel na porta ${listen_port}...${NC}"
+    create_stunnel_config "$listen_port" "$connect_host" "<span class="math-inline">connect\_port" \|\| return 1
+\# Cria o serviço systemd personalizado para o stunnel
+echo \-e "</span>{YELLOW}Criando serviço systemd para stunnel na porta <span class="math-inline">\{listen\_port\}\.\.\.</span>{NC}"
     cat <<EOF > "$STUNNEL_SERVICE_FILE"
 [Unit]
 Description=Stunnel Custom Service on Port ${listen_port}
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/stunnel4 $STUNNEL_CONFIG_FILE
-Restart=always
-User=root
-Group=root
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=stunnel_custom_${listen_port}
+ExecStart=/usr/bin/stunnel4 <span class="math-inline">STUNNEL\_CONFIG\_FILE
+Restart\=always
+User\=root
+Group\=root
+StandardOutput\=syslog
+StandardError\=syslog
+SyslogIdentifier\=stunnel\_custom\_</span>{listen_port}
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload || { echo -e "${RED}Erro: Falha ao recarregar daemons do systemd.${NC}"; return 1; }
-    systemctl enable stunnel_custom.service || { echo -e "${RED}Erro: Falha ao habilitar serviço stunnel_custom.${NC}"; return 1; }
-    systemctl start stunnel_custom.service || { echo -e "${RED}Erro: Falha ao iniciar serviço stunnel_custom. Verifique os logs (journalctl -u stunnel_custom.service).${NC}"; return 1; }
+    systemctl daemon-reload || { echo -e "<span class="math-inline">\{RED\}Erro\: Falha ao recarregar daemons do systemd\.</span>{NC}"; return 1; }
+    systemctl enable stunnel_custom.service || { echo -e "<span class="math-inline">\{RED\}Erro\: Falha ao habilitar serviço stunnel\_custom\.</span>{NC}"; return 1; }
+    systemctl start stunnel_custom.service || { echo -e "<span class="math-inline">\{RED\}Erro\: Falha ao iniciar serviço stunnel\_custom\. Verifique os logs \(journalctl \-u stunnel\_custom\.service\)\.</span>{NC}"; return 1; }
 
-    echo "$listen_port|$connect_host|$connect_port" > "$STUNNEL_STATUS_FILE" # Salva a config
-    echo -e "${GREEN}✅ Stunnel ativado na porta ${listen_port}, conectando a ${connect_host}:${connect_port}.${NC}"
-    return 0
-}
-
-# Para o serviço stunnel autônomo
-stop_stunnel_standalone_service() {
-    echo -e "${YELLOW}Parando serviço stunnel autônomo...${NC}"
-    if systemctl is-active stunnel_custom.service &>/dev/null; then
-        systemctl stop stunnel_custom.service || { echo -e "${RED}Erro ao parar stunnel_custom.service.${NC}"; return 1; }
-        systemctl disable stunnel_custom.service || { echo -e "${RED}Erro ao desabilitar stunnel_custom.service.${NC}"; return 1; }
-        echo -e "${GREEN}Stunnel autônomo parado e desabilitado.${NC}"
-    else
-        echo -e "${YELLOW}Stunnel autônomo não está ativo ou não foi configurado.${NC}"
+    echo "$listen_port|$connect_host|$connect_port" > "<span class="math-inline">STUNNEL\_STATUS\_FILE" \# Salva a config
+echo \-e "</span>{GREEN}✅ Stunnel ativado na porta ${listen_port}, conectando a <span class="math-inline">\{connect\_host\}\:</span>{connect_port}.<span class="math-inline">\{NC\}"
+return 0
+\}
+\# Para o serviço stunnel autônomo
+stop\_stunnel\_standalone\_service\(\) \{
+echo \-e "</span>{YELLOW}Parando serviço stunnel autônomo...<span class="math-inline">\{NC\}"
+if systemctl is\-active stunnel\_custom\.service &\>/dev/null; then
+systemctl stop stunnel\_custom\.service \|\| \{ echo \-e "</span>{RED}Erro ao parar stunnel_custom.service.<span class="math-inline">\{NC\}"; return 1; \}
+systemctl disable stunnel\_custom\.service \|\| \{ echo \-e "</span>{RED}Erro ao desabilitar stunnel_custom.service.<span class="math-inline">\{NC\}"; return 1; \}
+echo \-e "</span>{GREEN}Stunnel autônomo parado e desabilitado.<span class="math-inline">\{NC\}"
+else
+echo \-e "</span>{YELLOW}Stunnel autônomo não está ativo ou não foi configurado.${NC}"
     fi
     # Limpa o arquivo de status
     if [ -f "$STUNNEL_STATUS_FILE" ]; then
-        rm "$STUNNEL_STATUS_FILE"
-    fi
-    return 0
-}
-
-# --- Funções de Desinstalação (Modificada para incluir Stunnel autônomo na desinstalação geral) ---
-uninstall_rustyproxy() { # Nome original, mas agora desinstala o Stunnel também
-    echo -e "${YELLOW}🗑️ DESINSTALANDO RUSTY PROXY E SERVIÇO STUNNEL (SE ATIVO), AGUARDE...${RESET}"
+        rm "<span class="math-inline">STUNNEL\_STATUS\_FILE"
+fi
+return 0
+\}
+\# \-\-\- Funções de Desinstalação \(Modificada para incluir Stunnel autônomo na desinstalação geral\) \-\-\-
+uninstall\_rustyproxy\(\) \{ \# Nome original, mas agora desinstala o Stunnel também
+echo \-e "</span>{YELLOW}🗑️ DESINSTALANDO RUSTY PROXY E SERVIÇO STUNNEL (SE ATIVO), AGUARDE...${RESET}"
     sleep 2
     clear
 
@@ -317,11 +306,11 @@ uninstall_rustyproxy() { # Nome original, mas agora desinstala o Stunnel também
         rm -rf "$STUNNEL_CONF_DIR" # Remove a pasta de configuração completa
     fi
     if [ -f "$STUNNEL_STATUS_FILE" ]; then
-        rm "$STUNNEL_STATUS_FILE"
-    fi
-    # Tenta remover o pacote stunnel4 se não for mais necessário
-    if dpkg -s stunnel4 &>/dev/null; then
-        echo -e "${YELLOW}Removendo pacote stunnel4...${NC}"
+        rm "<span class="math-inline">STUNNEL\_STATUS\_FILE"
+fi
+\# Tenta remover o pacote stunnel4 se não for mais necessário
+if dpkg \-s stunnel4 &\>/dev/null; then
+echo \-e "</span>{YELLOW}Removendo pacote stunnel4...${NC}"
         apt autoremove stunnel4 -y > /dev/null 2>&1
     fi
 
@@ -345,43 +334,43 @@ show_menu() {
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
 
     # Exibição de Portas do RustyProxy (Original)
-    if [ -s "$PORTS_FILE" ]; then
-        local active_proxies_status=$(cat "$PORTS_FILE" | while IFS='|' read -r port _; do
-            # Tentativa de pegar o status real do serviço, não apenas o do arquivo
-            local service_active=$(systemctl is-active proxy${port}.service 2>/dev/null || echo "inactive")
+    if [ -s "<span class="math-inline">PORTS\_FILE" \]; then
+local active\_proxies\_status\=</span>(cat "<span class="math-inline">PORTS\_FILE" \| while IFS\='\|' read \-r port \_; do
+\# Tentativa de pegar o status real do serviço, não apenas o do arquivo
+local service\_active\=</span>(systemctl is-active proxy${port}.service 2>/dev/null || echo "inactive")
             local active_status_icon=""
             local color_code=""
-            if [ "$service_active" = "active" ]; then
-                active_status_icon="✅ ATIVO"
-                color_code="${GREEN}"
+            if [ "<span class="math-inline">service\_active" \= "active" \]; then
+active\_status\_icon\="✅ ATIVO"
+color\_code\="</span>{GREEN}"
             else
                 active_status_icon="❌ INATIVO"
                 color_code="${RED}"
             fi
-            echo -e " ${color_code} - ${port} (${active_status_icon})${RESET}"
-        done)
-        echo -e "\033[1;36m┃\033[1;33mPORTAS RUSTYPROXY ATIVAS:${RESET}"
+            echo -e " ${color_code} - <span class="math-inline">\{port\} \(</span>{active_status_icon})<span class="math-inline">\{RESET\}"
+done\)
+echo \-e "\\033\[1;36m┃\\033\[1;33mPORTAS RUSTYPROXY ATIVAS\:</span>{RESET}"
         echo -e "$active_proxies_status"
     else
-        echo -e "\033[1;36m┃ ${YELLOW}Nenhuma porta RustyProxy ativa.${RESET}"
+        echo -e "\033[1;36m┃ <span class="math-inline">\{YELLOW\}Nenhuma porta RustyProxy ativa\.</span>{RESET}"
     fi
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
 
     # Exibição do Status do Stunnel Autônomo
-    echo -e "\033[1;36m┃\033[1;33mSTATUS STUNNEL AUTÔNOMO:${NC}"
-    local stunnel_status=$(systemctl is-active stunnel_custom.service 2>/dev/null)
+    echo -e "\033[1;36m┃\033[1;33mSTATUS STUNNEL AUTÔNOMO:<span class="math-inline">\{NC\}"
+local stunnel\_status\=</span>(systemctl is-active stunnel_custom.service 2>/dev/null)
     if [ "$stunnel_status" == "active" ]; then
-        if [ -f "$STUNNEL_STATUS_FILE" ]; then
-            local stunnel_config=$(cat "$STUNNEL_STATUS_FILE")
-            local stunnel_listen_port=$(echo "$stunnel_config" | cut -d'|' -f1)
-            local stunnel_connect_host=$(echo "$stunnel_config" | cut -d'|' -f2)
-            local stunnel_connect_port=$(echo "$stunnel_config" | cut -d'|' -f3)
-            echo -e "\033[1;36m┃ ${GREEN}[+] ATIVO na porta ${stunnel_listen_port} -> ${stunnel_connect_host}:${stunnel_connect_port}${NC}"
+        if [ -f "<span class="math-inline">STUNNEL\_STATUS\_FILE" \]; then
+local stunnel\_config\=</span>(cat "<span class="math-inline">STUNNEL\_STATUS\_FILE"\)
+local stunnel\_listen\_port\=</span>(echo "<span class="math-inline">stunnel\_config" \| cut \-d'\|' \-f1\)
+local stunnel\_connect\_host\=</span>(echo "<span class="math-inline">stunnel\_config" \| cut \-d'\|' \-f2\)
+local stunnel\_connect\_port\=</span>(echo "$stunnel_config" | cut -d'|' -f3)
+            echo -e "\033[1;36m┃ ${GREEN}[+] ATIVO na porta ${stunnel_listen_port} -> <span class="math-inline">\{stunnel\_connect\_host\}\:</span>{stunnel_connect_port}${NC}"
         else
-            echo -e "\033[1;36m┃ ${YELLOW}[?] Ativo, mas config. desconhecida.${NC}"
+            echo -e "\033[1;36m┃ <span class="math-inline">\{YELLOW\}\[?\] Ativo, mas config\. desconhecida\.</span>{NC}"
         fi
     else
-        echo -e "\033[1;36m┃ ${RED}[-] INATIVO.${NC}"
+        echo -e "\033[1;36m┃ <span class="math-inline">\{RED\}\[\-\] INATIVO\.</span>{NC}"
     fi
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
 
@@ -430,77 +419,76 @@ show_menu() {
         4) # ALTERAR STATUS (RustyProxy)
             clear
             read -p "━➤ DIGITE A PORTA CUJO STATUS DESEJA ALTERAR: " port
-            while ! validate_port "$port"; do read -p "━➤ DIGITE UMA PORTA VÁLIDA: " port; done
-            read -p "━➤ DIGITE O NOVO STATUS DO PROXY: " new_status
-            new_status=${new_status:-"RUSTY PROXY"}
-            update_proxy_status "$port" "$new_status"
-            sleep 1
-            read -n 1 -s -r -p "━➤ PRESSIONE QUALQUER TECLA PARA VOLTAR AO MENU."
-            ;;
-        5) # DESINSTALAR RustyProxy & Stunnel (Texto ajustado)
-            clear
-            uninstall_rustyproxy
-            sleep 1
-            exit 0
-            ;;
-        # --- NOVAS OPÇÕES PARA STUNNEL AUTÔNOMO ---
-        6) # ATIVAR/CONFIGURAR Stunnel Autônomo
-            clear
-            echo -e "${YELLOW}Configurar e Ativar Stunnel Autônomo${NC}"
+            while ! validate_port "<span class="math-inline">port"; do read \-p "━➤ DIGITE UMA PORTA VÁLIDA\: " port; done
+read \-p "━➤ DIGITE O NOVO STATUS DO PROXY\: " new\_status
+new\_status\=</span>{new_status:-"RUSTY PROXY"}
+            update_proxy_status "$port" "<span class="math-inline">new\_status"
+sleep 1
+read \-n 1 \-s \-r \-p "━➤ PRESSIONE QUALQUER TECLA PARA VOLTAR AO MENU\."
+;;
+5\) \# DESINSTALAR RustyProxy & Stunnel \(Texto ajustado\)
+clear
+uninstall\_rustyproxy
+sleep 1
+exit 0
+;;
+\# \-\-\- NOVAS OPÇÕES PARA STUNNEL AUTÔNOMO \-\-\-
+6\) \# ATIVAR/CONFIGURAR Stunnel Autônomo
+clear
+echo \-e "</span>{YELLOW}Configurar e Ativar Stunnel Autônomo${NC}"
             echo " "
             read -p "━➤ Digite a PORTA DE ESCUTA para o Stunnel (sugestão: 443 ou 8443): " stunnel_listen_port
             stunnel_listen_port=${stunnel_listen_port:-443} # Padrão sugerido
             while ! validate_port "$stunnel_listen_port"; do read -p "━➤ Digite uma porta válida para o Stunnel: " stunnel_listen_port; done
 
             read -p "━➤ Digite o HOST DE DESTINO para o Stunnel (ex: 127.0.0.1 para serviço local, ou IP/domínio remoto): " stunnel_connect_host
-            if [ -z "$stunnel_connect_host" ]; then
-                echo -e "${RED}Host de destino não pode ser vazio.${RESET}"
-                sleep 2
-                continue
-            fi
-
-            read -p "━➤ Digite a PORTA DE DESTINO para o Stunnel (padrão: 22 para SSH, 1194 para OpenVPN, 80 para web server): " stunnel_connect_port
-            stunnel_connect_port=${stunnel_connect_port:-22}
+            if [ -z "<span class="math-inline">stunnel\_connect\_host" \]; then
+echo \-e "</span>{RED}Host de destino não pode ser vazio.<span class="math-inline">\{RESET\}"
+sleep 2
+continue
+fi
+read \-p "━➤ Digite a PORTA DE DESTINO para o Stunnel \(padrão\: 22 para SSH, 1194 para OpenVPN, 80 para web server\)\: " stunnel\_connect\_port
+stunnel\_connect\_port\=</span>{stunnel_connect_port:-22}
             while ! validate_port "$stunnel_connect_port"; do read -p "━➤ Digite uma porta de destino válida para o Stunnel: " stunnel_connect_port; done
             
-            start_stunnel_standalone_service "$stunnel_listen_port" "$stunnel_connect_host" "$stunnel_connect_port"
-            read -p "━➤ Operação do Stunnel concluída. Pressione qualquer tecla." dummy
-            ;;
-        7) # DESATIVAR Stunnel Autônomo
-            clear
-            stop_stunnel_standalone_service
-            sleep 1
-            read -p "━➤ Operação do Stunnel concluída. Pressione qualquer tecla." dummy
-            ;;
-        8) # REINICIAR Stunnel Autônomo
-            clear
-            echo -e "${YELLOW}Reiniciando Stunnel Autônomo...${NC}"
-            if systemctl is-active stunnel_custom.service &>/dev/null && [ -f "$STUNNEL_STATUS_FILE" ]; then
-                local stunnel_config=$(cat "$STUNNEL_STATUS_FILE")
-                local stunnel_listen_port=$(echo "$stunnel_config" | cut -d'|' -f1)
-                local stunnel_connect_host=$(echo "$stunnel_config" | cut -d'|' -f2)
-                local stunnel_connect_port=$(echo "$stunnel_config" | cut -d'|' -f3)
+            start_stunnel_standalone_service "$stunnel_listen_port" "$stunnel_connect_host" "<span class="math-inline">stunnel\_connect\_port"
+read \-p "━➤ Operação do Stunnel concluída\. Pressione qualquer tecla\." dummy
+;;
+7\) \# DESATIVAR Stunnel Autônomo
+clear
+stop\_stunnel\_standalone\_service
+sleep 1
+read \-p "━➤ Operação do Stunnel concluída\. Pressione qualquer tecla\." dummy
+;;
+8\) \# REINICIAR Stunnel Autônomo
+clear
+echo \-e "</span>{YELLOW}Reiniciando Stunnel Autônomo...${NC}"
+            if systemctl is-active stunnel_custom.service &>/dev/null && [ -f "<span class="math-inline">STUNNEL\_STATUS\_FILE" \]; then
+local stunnel\_config\=</span>(cat "<span class="math-inline">STUNNEL\_STATUS\_FILE"\)
+local stunnel\_listen\_port\=</span>(echo "<span class="math-inline">stunnel\_config" \| cut \-d'\|' \-f1\)
+local stunnel\_connect\_host\=</span>(echo "<span class="math-inline">stunnel\_config" \| cut \-d'\|' \-f2\)
+local stunnel\_connect\_port\=</span>(echo "$stunnel_config" | cut -d'|' -f3)
 
                 stop_stunnel_standalone_service # Para para garantir que tudo está limpo
-                start_stunnel_standalone_service "$stunnel_listen_port" "$stunnel_connect_host" "$stunnel_connect_port" # Inicia novamente
-                echo -e "${GREEN}Stunnel autônomo reiniciado com sucesso!${NC}"
-            else
-                echo -e "${RED}Stunnel autônomo não está ativo para reiniciar. Ative-o primeiro (Opção 6).${NC}"
-            fi
-            sleep 2
-            read -p "━➤ Operação do Stunnel concluída. Pressione qualquer tecla." dummy
-            ;;
-        9) # Ver Logs do Stunnel Autônomo
-            clear
-            echo -e "${YELLOW}Exibindo logs do Stunnel Autônomo (pressione Ctrl+C para sair)...${NC}"
-            journalctl -u stunnel_custom.service -f
-            ;;
-        0) # SAIR
-            clear
-            exit 0
-            ;;
-        *) # OPÇÃO INVÁLIDA
-            echo -e "${RED}OPÇÃO INVÁLIDA. PRESSIONE QUALQUER TECLA PARA VOLTAR AO MENU.${RESET}"
+                start_stunnel_standalone_service "$stunnel_listen_port" "$stunnel_connect_host" "<span class="math-inline">stunnel\_connect\_port" \# Inicia novamente
+echo \-e "</span>{GREEN}Stunnel autônomo reiniciado com sucesso!<span class="math-inline">\{NC\}"
+else
+echo \-e "</span>{RED}Stunnel autônomo não está ativo para reiniciar. Ative-o primeiro (Opção 6).<span class="math-inline">\{NC\}"
+fi
+sleep 2
+read \-p "━➤ Operação do Stunnel concluída\. Pressione qualquer tecla\." dummy
+;;
+9\) \# Ver Logs do Stunnel Autônomo
+clear
+echo \-e "</span>{YELLOW}Exibindo logs do Stunnel Autônomo (pressione Ctrl+C para sair)...<span class="math-inline">\{NC\}"
+journalctl \-u stunnel\_custom\.service \-f
+;;
+0\) \# SAIR
+clear
+exit 0
+;;
+\*\) \# OPÇÃO INVÁLIDA
+echo \-e "</span>{RED}OPÇÃO INVÁLIDA. PRESSIONE QUALQUER TECLA PARA VOLTAR AO MENU.${RESET}"
             read -n 1 -s -r
             ;;
     esac
