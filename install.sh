@@ -73,8 +73,8 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
 
     # ---->>>> Instalação de pacotes requisitos e atualização do sistema
     show_progress "ATUALIZANDO O SISTEMA E INSTALANDO DEPENDÊNCIAS, AGUARDE..."
-    apt upgrade -y > /dev/null 2>&1 || error_exit "Falha ao atualizar o sistema"
-    apt-get install curl build-essential git -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes essenciais (curl, build-essential, git)"
+    # A LINHA ABAIXO FOI MODIFICADA
+    apt-get install curl build-essential git pkg-config libssl-dev -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes essenciais (curl, build-essential, git, pkg-config, libssl-dev)"
     increment_step
 
     # ---->>>> Criando o diretório do script
@@ -110,8 +110,7 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     # Navega para o diretório do projeto Rust e compila
     cd /root/RustyProxyOnly/RustyProxy || error_exit "Diretório do projeto Rust não encontrado"
     
-    # *** LINHA MODIFICADA AQUI ***
-    # Remove o redirecionamento para ver os erros de compilação
+    # *** LINHA MODIFICADA PARA EXIBIR ERROS DE COMPILAÇÃO ***
     cargo build --release --jobs $(nproc) || error_exit "Falha ao compilar o RustyProxy. Verifique o output acima para detalhes."
     
     # Move o executável compilado
