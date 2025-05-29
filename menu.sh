@@ -44,6 +44,8 @@ add_proxy_port() {
     fi
 
     # O comando ExecStart permanece como no seu original: apenas --port e --status
+    # Isso significa que o RustyProxy usará as portas de backend padrão (SSH, OpenVPN, WS, Stunnel)
+    # que estão hardcoded no main.rs, a menos que você as mude manualmente no main.rs.
     local command="/opt/rustyproxy/proxy --port $port --status \"$status\""
     local service_file_path="/etc/systemd/system/proxy${port}.service"
     local service_file_content="[Unit]
@@ -392,7 +394,7 @@ show_menu() {
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m05\033[1;31m] \033[1;37m◉ \033[1;33mDESINSTALAR RustyProxy & Stunnel  \033[1;36m┃\033[0m" # Texto ajustado
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m06\033[1;31m] \033[1;37m◉ \033[1;33mATIVAR/CONFIGURAR Stunnel Autônomo\033[1;36m┃\033[0m"
-    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m07\033[1;31m] \033[1;37m◉ \033[1;33mDESATIVAR Stunnel Autônomo        \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;31m[\033[1;34m07\033[1;31m] \033[1;33mDESATIVAR Stunnel Autônomo        \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m08\033[1;31m] \033[1;33mREINICIAR Stunnel Autônomo        \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┃\033[1;31m[\033[1;34m09\033[1;31m] \033[1;33mVer Logs do Stunnel Autônomo      \033[1;36m┃\033[0m"
     echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
