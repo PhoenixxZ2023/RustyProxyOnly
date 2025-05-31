@@ -78,7 +78,7 @@ async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
     }
 }
 
-// --- Funções auxiliares (transfer_data e peek_stream movidas para cima) ---
+// --- Funções auxiliares (transfer_data e peek_stream) ---
 
 async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
@@ -176,7 +176,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         let server_to_client_task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> ;
 
         if is_http_connect_method {
-            let mut server_stream = TcpStream::connect(&addr_proxy).await // <--- Corrigido: 'mut' para server_stream
+            let mut server_stream = TcpStream::connect(&addr_proxy).await 
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao destino HTTP CONNECT {}: {}", addr_proxy, e)))?;
 
             let response = b"HTTP/1.1 200 Connection established\r\n\r\n";
@@ -198,7 +198,8 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
 
         } else if protocol == "websocket" {
-            let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, response: Response| { // <--- Corrigido: remove 'mut' de response
+            // A `client_stream` original (mutável) é usada aqui para o handshake.
+            let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, response: Response| { 
                 println!("Handshake Request Headers do Cliente: {:?}", req.headers());
                 if let Some(user_agent) = req.headers().get("User-Agent") {
                     println!("User-Agent do Cliente: {:?}", user_agent);
@@ -278,7 +279,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             });
 
         } else {
-            let mut server_stream = TcpStream::connect(&addr_proxy).await // <--- Corrigido: 'mut' para server_stream
+            let mut server_stream = TcpStream::connect(&addr_proxy).await 
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy {}: {}", addr_proxy, e)))?;
 
             let initial_data_to_send = initial_data_slice.to_vec(); // Cria uma CÓPIA dos dados
@@ -312,13 +313,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
         }
     }
-}
-
-// `peek_stream` permanece o mesmo (retorna Vec<u8>)
-async fn peek_stream(stream: &TcpStream) -> Result<Vec<u8>, Error> {
-    let mut peek_buffer = vec![0; 4096];
-    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
-    Ok(peek_buffer[..bytes_peeked].to_vec())
 }
 
 // `detect_and_peek_protocol` foi removido, e `get_stunnel_backend_port` também.
