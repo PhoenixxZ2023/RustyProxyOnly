@@ -222,7 +222,8 @@ async fn websocket_transfer(
             let mut header = [0; 2];
             if client_read.read_exact(&mut header).await? == 0 {
                 println!("Cliente WebSocket fechou a conexão.");
-                break Ok(());
+                // CORREÇÃO AQUI: Especificando o tipo de erro para `Ok`
+                break Ok::<(), Error>(());
             }
 
             let fin = (header[0] & 0x80) != 0;
@@ -233,28 +234,31 @@ async fn websocket_transfer(
             if payload_len == 126 {
                 let mut extended_len_bytes = [0; 2];
                 if client_read.read_exact(&mut extended_len_bytes).await? == 0 {
-                    break Ok(());
+                    // CORREÇÃO AQUI: Especificando o tipo de erro para `Ok`
+                    break Ok::<(), Error>(());
                 }
                 payload_len = u16::from_be_bytes(extended_len_bytes) as usize;
             } else if payload_len == 127 {
                 let mut extended_len_bytes = [0; 8];
                 if client_read.read_exact(&mut extended_len_bytes).await? == 0 {
-                    break Ok(());
+                    // CORREÇÃO AQUI: Especificando o tipo de erro para `Ok`
+                    break Ok::<(), Error>(());
                 }
-                // AQUI ESTÁ A CORREÇÃO: de u62 para u64
                 payload_len = u64::from_be_bytes(extended_len_bytes) as usize;
             }
 
             let mut masking_key = [0; 4];
             if masked {
                 if client_read.read_exact(&mut masking_key).await? == 0 {
-                    break Ok(());
+                    // CORREÇÃO AQUI: Especificando o tipo de erro para `Ok`
+                    break Ok::<(), Error>(());
                 }
             }
 
             let mut payload_buffer = vec![0; payload_len];
             if client_read.read_exact(&mut payload_buffer).await? == 0 {
-                break Ok(());
+                // CORREÇÃO AQUI: Especificando o tipo de erro para `Ok`
+                break Ok::<(), Error>(());
             }
 
             // Desmascarar payload
@@ -290,7 +294,7 @@ async fn websocket_transfer(
                         pong_frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
                     }
                     pong_frame.extend_from_slice(&payload_buffer);
-                    client_write.write_all(&pong_frame).await?;
+                    client_write.write.all(&pong_frame).await?;
                 },
                 0xA => { // Pong frame (FIN, Pong) - ignorar
                     // println!("Received Pong from client.");
