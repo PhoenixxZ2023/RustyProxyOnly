@@ -24,7 +24,7 @@ struct Config {
     ssh_port: u16,
     openvpn_port: u16,
     websocket_port: u16,
-    // stunnel_backend_port foi removido
+    // stunnel_backend_port foi removido (não é mais passado para o RustyProxy)
     timeout_secs: u64,
 }
 
@@ -36,7 +36,7 @@ impl Config {
             ssh_port: 22,
             openvpn_port: 1194,
             websocket_port: 8081,
-            // stunnel_backend_port foi removido
+            // stunnel_backend_port foi removido aqui também
             timeout_secs: 1,
         }
     }
@@ -50,7 +50,6 @@ async fn main() -> Result<(), Error> {
     println!("Porta SSH: {}", config.ssh_port);
     println!("Porta OpenVPN: {}", config.openvpn_port);
     println!("Porta WebSocket: {}", config.websocket_port);
-    // Log da porta Stunnel foi removido
     start_proxy(listener, config).await;
     Ok(())
 }
@@ -85,11 +84,11 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         // Fazer um peek inicial para detectar o protocolo
         let mut initial_buffer = vec![0; 4096];
         let bytes_peeked = client_stream.peek(&mut initial_buffer).await?;
-        let initial_data = &initial_buffer[..bytes_peeked];
-        let data_str = String::from_utf8_lossy(initial_data);
+        let initial_data_slice = &initial_buffer[..bytes_peeked]; // Slice para detecção
+        let data_str = String::from_utf8_lossy(initial_data_slice);
 
         let mut protocol = "unknown";
-        let mut addr_proxy = format!("0.0.0.0:{}", config.ssh_port); // Default fallback
+        let mut addr_proxy = format!("0.0.0.0:{}", config.ssh_port); // Fallback padrão
         let mut is_http_connect_method = false; // Flag para método CONNECT
 
         // Lógica de detecção de protocolos, reordenada para prioridade
@@ -116,7 +115,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             protocol = "ssh";
             addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
             println!("Protocolo detectado: SSH. Encaminhando para: {}", addr_proxy);
-        } else if initial_data.len() >= 2 && initial_data[0] == 0x00 && initial_data[1] >= 0x14 {
+        } else if initial_data_slice.len() >= 2 && initial_data_slice[0] == 0x00 && initial_data_slice[1] >= 0x14 {
             protocol = "openvpn";
             addr_proxy = format!("0.0.0.0:{}", config.openvpn_port);
             println!("Protocolo detectado: OpenVPN. Encaminhando para: {}", addr_proxy);
@@ -125,7 +124,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             protocol = "http_other"; // Poderia ser um túnel HTTP ou outra coisa
             addr_proxy = format!("0.0.0.0:{}", config.ssh_port); // Fallback para SSH, ou outra porta se houver um HTTP backend
             println!("Protocolo detectado: HTTP (GET/POST/etc). Encaminhando para: {}", addr_proxy);
-        } else if initial_data.is_empty() {
+        } else if initial_data_slice.is_empty() {
             println!("Nenhum dado recebido, assumindo SSH.");
             protocol = "ssh";
             addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
@@ -135,7 +134,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
         }
 
-        // Lógica para HTTP CONNECT (mantida)
+        // Lógica para HTTP CONNECT
         if is_http_connect_method {
             let mut server_stream = TcpStream::connect(&addr_proxy).await
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao destino HTTP CONNECT {}: {}", addr_proxy, e)))?;
@@ -143,6 +142,12 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             let response = b"HTTP/1.1 200 Connection established\r\n\r\n";
             client_stream.write_all(response).await
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar resposta HTTP CONNECT para o cliente: {}", e)))?;
+
+            // NOVO: Consome a requisição CONNECT da stream do cliente.
+            // A requisição CONNECT já foi detectada e seu conteúdo está no `initial_buffer`.
+            // Agora precisamos "ler" esses bytes da stream real do cliente para que ela avance.
+            let mut dummy_read_buffer = vec![0; bytes_peeked];
+            client_stream.read_exact(&mut dummy_read_buffer).await?; 
 
             let (client_read, client_write) = client_stream.into_split();
             let (server_read, server_write) = server_stream.into_split();
@@ -152,23 +157,27 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             let server_read_arc = Arc::new(Mutex::new(server_read));
             let server_write_arc = Arc::new(Mutex::new(server_write));
             
-            let client_to_server = transfer_data(client_read_arc.clone(), server_write_arc.clone(), config);
-            let server_to_client = transfer_data(server_read_arc.clone(), client_write_arc.clone(), config);
-
             tokio::try_join!(client_to_server, server_to_client)?;
 
         } else if protocol == "websocket" {
-            // Lógica existente para WebSocket
+            // Lógica para WebSocket
             handle_websocket_proxy(client_stream, &addr_proxy, config).await?;
         } else {
-            // Lógica existente para SSH, OpenVPN, e outros TCP genéricos
+            // Lógica para SSH, OpenVPN, e outros TCP genéricos
             let mut server_stream = TcpStream::connect(&addr_proxy).await
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy {}: {}", addr_proxy, e)))?;
 
-            // Escreve os dados iniciais que foram 'peeked' para o servidor de backend
-            client_stream.read_exact(&mut initial_buffer[..bytes_peeked]).await?; // Consome os bytes que foram peeked
-            server_stream.write_all(initial_data).await?; 
+            // CORREÇÃO E0502: Clona os dados peeked e os escreve, depois consome do cliente
+            let initial_data_to_send = initial_data_slice.to_vec(); // Cria uma CÓPIA dos dados
+            
+            // Consome os bytes que foram peeked da stream real do cliente para avançar o cursor
+            let mut dummy_read_buffer = vec![0; bytes_peeked];
+            client_stream.read_exact(&mut dummy_read_buffer).await?; 
 
+            // Escreve a CÓPIA dos dados para o servidor de backend
+            server_stream.write_all(&initial_data_to_send).await?; 
+
+            // Separa as streams para transferência bidirecional
             let (client_read_half, client_write_half) = client_stream.into_split();
             let (server_read_half, server_write_half) = server_stream.into_split();
 
@@ -177,9 +186,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             let server_read_arc = Arc::new(Mutex::new(server_read_half));
             let server_write_arc = Arc::new(Mutex::new(server_write_half));
             
-            let client_to_server = transfer_data(client_read_arc.clone(), server_write_arc.clone(), config);
-            let server_to_client = transfer_data(server_read_arc.clone(), client_write_arc.clone(), config);
-
             tokio::try_join!(client_to_server, server_to_client)?;
         }
         Ok(())
@@ -194,8 +200,9 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
     }
 }
 
+// handle_websocket_proxy (ajuste para split de streams)
 async fn handle_websocket_proxy(
-    client_stream: TcpStream,
+    mut client_stream: TcpStream, // Agora mutável para o split
     server_addr: &str,
     config: &Config,
 ) -> Result<(), Error> {
@@ -215,13 +222,17 @@ async fn handle_websocket_proxy(
         .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", server_addr, e)))?;
     println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", server_addr, response_server.status());
 
-    let (mut client_sink, mut client_stream) = ws_server_stream.split(); // ATENÇÃO: Sink e Stream invertidos!
-    let (mut server_sink, mut server_stream) = ws_client_stream.split(); // ATENÇÃO: Sink e Stream invertidos!
+    // CORREÇÃO: As metades de stream estavam invertidas no código anterior,
+    // o que causaria dados do cliente indo para o cliente, e do servidor para o servidor.
+    // Agora: client_sink é para ESCREVER no cliente, client_stream é para LER do cliente.
+    // server_sink é para ESCREVER no servidor, server_stream é para LER do servidor.
+    let (mut client_write_half, mut client_read_half) = ws_client_stream.split(); 
+    let (mut server_write_half, mut server_read_half) = ws_server_stream.split(); 
 
     let client_to_server_task = async move {
         loop {
             tokio::select! {
-                res = timeout(Duration::from_secs(config.timeout_secs), client_stream.next()) => {
+                res = timeout(Duration::from_secs(config.timeout_secs), client_read_half.next()) => { // Lendo do cliente
                     let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do cliente WS"))?;
                     let msg = match msg_opt {
                         Some(Ok(m)) => m,
@@ -235,12 +246,12 @@ async fn handle_websocket_proxy(
                     };
                     if msg.is_close() {
                         println!("Cliente WS enviou mensagem de CLOSE.");
-                        server_sink.send(msg).await
+                        server_write_half.send(msg).await // Escrevendo para o servidor
                             .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para servidor WS: {}", e)))?;
                         break;
                     }
                     if msg.is_ping() { continue; }
-                    server_sink.send(msg).await
+                    server_write_half.send(msg).await // Escrevendo para o servidor
                         .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para servidor: {}", e)))?;
                 }
             }
@@ -251,7 +262,7 @@ async fn handle_websocket_proxy(
     let server_to_client_task = async move {
         loop {
             tokio::select! {
-                res = timeout(Duration::from_secs(config.timeout_secs), server_stream.next()) => {
+                res = timeout(Duration::from_secs(config.timeout_secs), server_read_half.next()) => { // Lendo do servidor
                     let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do servidor WS"))?;
                     let msg = match msg_opt {
                         Some(Ok(m)) => m,
@@ -265,12 +276,12 @@ async fn handle_websocket_proxy(
                     };
                     if msg.is_close() {
                         println!("Servidor WS enviou mensagem de CLOSE.");
-                        client_sink.send(msg).await
+                        client_write_half.send(msg).await // Escrevendo para o cliente
                             .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para cliente WS: {}", e)))?;
                         break;
                     }
                     if msg.is_ping() { continue; }
-                    client_sink.send(msg).await
+                    client_write_half.send(msg).await // Escrevendo para o cliente
                         .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para cliente: {}", e)))?;
                 }
             }
@@ -323,15 +334,8 @@ async fn peek_stream(stream: &TcpStream) -> Result<Vec<u8>, Error> {
     Ok(peek_buffer[..bytes_peeked].to_vec())
 }
 
-// `detect_and_peek_protocol` foi substituído pela lógica de detecção em `handle_client`
-// Esta função agora é redundante e pode ser removida se não houver outras chamadas a ela.
-// Apenas para evitar erros de compilação, vamos manter uma versão básica.
-async fn detect_and_peek_protocol(_stream: &TcpStream, _config: &Config) -> Result<(&'static str, Vec<u8>), Error> {
-    // Esta função não é mais usada diretamente na lógica principal de handle_client,
-    // pois a detecção foi incorporada diretamente lá para ter acesso ao `initial_buffer` e `data_str`.
-    // Retorna um fallback ou um erro se ainda for chamada.
-    Err(Error::new(ErrorKind::Other, "detect_and_peek_protocol não deve ser chamada diretamente após refatoração."))
-}
+// `detect_and_peek_protocol` e `get_stunnel_backend_port` foram removidos,
+// pois a lógica foi consolidada ou não é mais necessária para este escopo.
 
 
 fn get_port() -> u16 {
@@ -350,8 +354,6 @@ fn get_port() -> u16 {
     }
     port
 }
-
-// get_stunnel_backend_port foi removido
 
 
 fn get_status() -> String {
