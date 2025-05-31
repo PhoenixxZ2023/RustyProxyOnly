@@ -241,7 +241,8 @@ async fn websocket_transfer(
                 if client_read.read_exact(&mut extended_len_bytes).await? == 0 {
                     break Ok(());
                 }
-                payload_len = u62::from_be_bytes(extended_len_bytes) as usize; // Alterei de u64 para u62, pois u64 é muito grande e pode levar a erros de alocação se o payload for muito grande, se vc quiser que suporte payload de 64 bits de tamanho, use u64 e o read_exact também precisará ser alterado
+                // AQUI ESTÁ A CORREÇÃO: de u62 para u64
+                payload_len = u64::from_be_bytes(extended_len_bytes) as usize;
             }
 
             let mut masking_key = [0; 4];
