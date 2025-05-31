@@ -5,9 +5,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
-use std::future::Future; // Necessário para inferir o tipo da Future
-use std::pin::Pin; // Necessário para Box::pin
-
+use std::future::Future;
+use std::pin::Pin;
 
 // Importações para tokio-tungstenite
 use tokio_tungstenite::{
@@ -79,6 +78,46 @@ async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
         }
     }
 }
+
+
+// --- Funções de transferência TCP genérica (MOVIDA PARA CIMA) ---
+async fn transfer_data(
+    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
+    config: &Config,
+) -> Result<(), Error> {
+    let mut buffer = vec![0; 32768];
+    loop {
+        let bytes_read = {
+            let mut read_guard = read_stream.lock().await;
+            match timeout(Duration::from_secs(config.timeout_secs), read_guard.read(&mut buffer)).await {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura TCP")),
+            }
+        };
+
+        if bytes_read == 0 {
+            break;
+        }
+
+        let mut write_guard = write_stream.lock().await;
+        match timeout(Duration::from_secs(config.timeout_secs), write_guard.write_all(&buffer[..bytes_read])).await {
+            Ok(Ok(())) => { /* println!("Transferidos {} bytes", bytes_read); */ },
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita TCP")),
+        }
+    }
+    Ok(())
+}
+
+// `peek_stream` permanece o mesmo (retorna Vec<u8>)
+async fn peek_stream(stream: &TcpStream) -> Result<Vec<u8>, Error> {
+    let mut peek_buffer = vec![0; 4096];
+    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
+    Ok(peek_buffer[..bytes_peeked].to_vec())
+}
+
 
 async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<(), Error> {
     let result = timeout(Duration::from_secs(30), async {
