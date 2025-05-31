@@ -212,33 +212,52 @@ async fn websocket_transfer(
     client_stream: TcpStream,
     server_stream: TcpStream,
 ) -> Result<(), Error> {
-    let (mut client_read, mut client_write) = client_stream.into_split();
-    let (mut server_read, mut server_write) = server_stream.into_split();
+    let (client_read_half, client_write_half) = client_stream.into_split();
+    let (server_read_half, server_write_half) = server_stream.into_split();
+
+    // Envolve as metades em Arc<Mutex> para que possam ser compartilhadas
+    let client_read = Arc::new(Mutex::new(client_read_half));
+    let client_write = Arc::new(Mutex::new(client_write_half));
+    let server_read = Arc::new(Mutex::new(server_read_half));
+    let server_write = Arc::new(Mutex::new(server_write_half));
 
     // Task para ler do cliente (WebSocket) e escrever para o servidor (raw)
-    let client_to_server_task = tokio::spawn(async move {
+    let client_to_server_task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move {
+        let mut buffer = Vec::new(); // Buffer para o payload do WebSocket
         loop {
             // Ler o cabeçalho do frame WebSocket (2 bytes)
             let mut header = [0; 2];
-            if client_read.read_exact(&mut header).await? == 0 {
-                println!("Cliente WebSocket fechou a conexão.");
+            let bytes_read_header = {
+                let mut read_guard = client_read.lock().await;
+                read_guard.read_exact(&mut header).await?
+            };
+            if bytes_read_header == 0 {
+                println!("Cliente WebSocket fechou a conexão (leitura de cabeçalho).");
                 break Ok::<(), Error>(());
             }
 
             let fin = (header[0] & 0x80) != 0;
-            let opcode = header[0] & 0x0F; // Usar & 0x0F para obter os 4 bits do opcode
+            let opcode = header[0] & 0x0F;
             let masked = (header[1] & 0x80) != 0;
             let mut payload_len = (header[1] & 0x7F) as usize;
 
             if payload_len == 126 {
                 let mut extended_len_bytes = [0; 2];
-                if client_read.read_exact(&mut extended_len_bytes).await? == 0 {
+                let bytes_read_ext_len = {
+                    let mut read_guard = client_read.lock().await;
+                    read_guard.read_exact(&mut extended_len_bytes).await?
+                };
+                if bytes_read_ext_len == 0 {
                     break Ok::<(), Error>(());
                 }
                 payload_len = u16::from_be_bytes(extended_len_bytes) as usize;
             } else if payload_len == 127 {
                 let mut extended_len_bytes = [0; 8];
-                if client_read.read_exact(&mut extended_len_bytes).await? == 0 {
+                let bytes_read_ext_len = {
+                    let mut read_guard = client_read.lock().await;
+                    read_guard.read_exact(&mut extended_len_bytes).await?
+                };
+                if bytes_read_ext_len == 0 {
                     break Ok::<(), Error>(());
                 }
                 payload_len = u64::from_be_bytes(extended_len_bytes) as usize;
@@ -246,34 +265,45 @@ async fn websocket_transfer(
 
             let mut masking_key = [0; 4];
             if masked {
-                if client_read.read_exact(&mut masking_key).await? == 0 {
+                let bytes_read_mask = {
+                    let mut read_guard = client_read.lock().await;
+                    read_guard.read_exact(&mut masking_key).await?
+                };
+                if bytes_read_mask == 0 {
                     break Ok::<(), Error>(());
                 }
             }
 
-            let mut payload_buffer = vec![0; payload_len];
-            if client_read.read_exact(&mut payload_buffer).await? == 0 {
+            buffer.resize(payload_len, 0); // Redimensiona o buffer para o tamanho do payload
+            let bytes_read_payload = {
+                let mut read_guard = client_read.lock().await;
+                read_guard.read_exact(&mut buffer).await?
+            };
+            if bytes_read_payload == 0 {
                 break Ok::<(), Error>(());
             }
 
             // Desmascarar payload
             if masked {
                 for i in 0..payload_len {
-                    payload_buffer[i] ^= masking_key[i % 4];
+                    buffer[i] ^= masking_key[i % 4];
                 }
             }
 
             match opcode {
                 0x1 | 0x2 => { // Text (0x1) ou Binary (0x2) frames - tunelar
-                    server_write.write_all(&payload_buffer).await?;
+                    let mut write_guard = server_write.lock().await;
+                    write_guard.write_all(&buffer[..bytes_read_payload]).await?;
                 },
                 0x8 => { // Close frame (FIN, Close)
                     println!("Cliente WebSocket pediu para fechar a conexão.");
-                    // Opcionalmente, enviar um close frame de volta
+                    // Enviar um close frame de volta (opcional)
                     let close_frame = [0x88, 0x00];
-                    client_write.write_all(&close_frame).await?;
-                    server_write.shutdown().await?; // Fechar a conexão com o servidor
-                    break Ok(());
+                    let mut write_guard = client_write.lock().await;
+                    write_guard.write_all(&close_frame).await?;
+                    let mut server_write_guard = server_write.lock().await;
+                    server_write_guard.shutdown().await?; // Fechar a conexão com o servidor
+                    break Ok::<(), Error>(()); // Saímos da task
                 },
                 0x9 => { // Ping frame (FIN, Ping)
                     // Responder com Pong frame
@@ -288,8 +318,9 @@ async fn websocket_transfer(
                         pong_frame.push(127);
                         pong_frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
                     }
-                    pong_frame.extend_from_slice(&payload_buffer);
-                    client_write.write_all(&pong_frame).await?; // CORREÇÃO AQUI
+                    pong_frame.extend_from_slice(&buffer[..bytes_read_payload]);
+                    let mut write_guard = client_write.lock().await;
+                    write_guard.write_all(&pong_frame).await?;
                 },
                 0xA => { // Pong frame (FIN, Pong) - ignorar
                     // println!("Received Pong from client.");
@@ -302,16 +333,20 @@ async fn websocket_transfer(
     });
 
     // Task para ler do servidor (raw) e escrever para o cliente (WebSocket)
-    let server_to_client_task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { // CORREÇÃO AQUI
+    let server_to_client_task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move {
         let mut buffer = [0; 8192];
         loop {
-            let bytes_read = server_read.read(&mut buffer).await?;
+            let bytes_read = {
+                let mut read_guard = server_read.lock().await;
+                read_guard.read(&mut buffer).await?
+            };
             if bytes_read == 0 {
                 println!("Servidor backend fechou a conexão.");
                 // Enviar close frame ao cliente WebSocket
                 let close_frame = [0x88, 0x00]; // FIN | Close, Payload Len = 0
-                client_write.write_all(&close_frame).await?;
-                break Ok::<(), Error>(()); // CORREÇÃO AQUI
+                let mut write_guard = client_write.lock().await;
+                write_guard.write_all(&close_frame).await?;
+                break Ok::<(), Error>(());
             }
 
             // Criar frame WebSocket (FIN=1, Opcode=Binary, Mask=0, Payload Len)
@@ -329,7 +364,8 @@ async fn websocket_transfer(
             }
             frame.extend_from_slice(&buffer[..bytes_read]);
 
-            client_write.write_all(&frame).await?;
+            let mut write_guard = client_write.lock().await;
+            write_guard.write_all(&frame).await?;
         }
     });
 
