@@ -289,8 +289,7 @@ async fn websocket_transfer(
                         pong_frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
                     }
                     pong_frame.extend_from_slice(&payload_buffer);
-                    // AQUI ESTÁ A CORREÇÃO: Removendo o '.write' extra
-                    client_write.write_all(&pong_frame).await?;
+                    client_write.write_all(&pong_frame).await?; // CORREÇÃO AQUI
                 },
                 0xA => { // Pong frame (FIN, Pong) - ignorar
                     // println!("Received Pong from client.");
@@ -303,7 +302,7 @@ async fn websocket_transfer(
     });
 
     // Task para ler do servidor (raw) e escrever para o cliente (WebSocket)
-    let server_to_client_task = tokio::spawn(async move {
+    let server_to_client_task: tokio::task::JoinHandle<Result<(), Error>> = tokio::spawn(async move { // CORREÇÃO AQUI
         let mut buffer = [0; 8192];
         loop {
             let bytes_read = server_read.read(&mut buffer).await?;
@@ -312,7 +311,7 @@ async fn websocket_transfer(
                 // Enviar close frame ao cliente WebSocket
                 let close_frame = [0x88, 0x00]; // FIN | Close, Payload Len = 0
                 client_write.write_all(&close_frame).await?;
-                break Ok(());
+                break Ok::<(), Error>(()); // CORREÇÃO AQUI
             }
 
             // Criar frame WebSocket (FIN=1, Opcode=Binary, Mask=0, Payload Len)
