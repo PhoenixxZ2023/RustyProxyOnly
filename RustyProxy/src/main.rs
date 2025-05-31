@@ -8,6 +8,9 @@ use tokio::time::{timeout, Duration};
 use std::future::Future;
 use std::pin::Pin;
 
+// Para logar dados em hexadecimal (precisa de 'hex = "0.4"' no Cargo.toml)
+use hex;
+
 // Importações para tokio-tungstenite
 use tokio_tungstenite::{
     accept_hdr_async, connect_async,
@@ -125,6 +128,12 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         let initial_data_slice = &initial_buffer[..bytes_peeked]; // Slice para detecção
         let data_str = String::from_utf8_lossy(initial_data_slice);
 
+        // --- NOVO LOG AQUI: Mostra os dados iniciais recebidos ---
+        println!("\n--- Dados Iniciais do Cliente ({} bytes) ---", bytes_peeked);
+        println!("Texto (UTF-8 Lossy):\n{}", data_str);
+        println!("Hexadecimal:\n{}\n--- Fim Dados Iniciais ---\n", hex::encode(initial_data_slice));
+        // --- FIM NOVO LOG ---
+
         let mut protocol = "unknown";
         let mut addr_proxy = format!("0.0.0.0:{}", config.ssh_port); // Fallback padrão
         let mut is_http_connect_method = false; // Flag para método CONNECT
@@ -198,7 +207,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
 
         } else if protocol == "websocket" {
-            // A `client_stream` original (mutável) é usada aqui para o handshake.
             let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, response: Response| { 
                 println!("Handshake Request Headers do Cliente: {:?}", req.headers());
                 if let Some(user_agent) = req.headers().get("User-Agent") {
@@ -314,8 +322,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
         }
     }
 }
-
-// `detect_and_peek_protocol` foi removido, e `get_stunnel_backend_port` também.
 
 fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
