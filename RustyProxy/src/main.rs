@@ -6,13 +6,15 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
 use std::future::Future; // Necessário para inferir o tipo da Future
+use std::pin::Pin; // Necessário para Box::pin
+
 
 // Importações para tokio-tungstenite
 use tokio_tungstenite::{
     accept_hdr_async, connect_async,
     tungstenite::{
         handshake::server::{Request, Response},
-        Message,
+        // Message, // Removida importação global, usada dentro do handle_websocket_proxy
     },
 };
 use futures_util::StreamExt;
@@ -132,10 +134,9 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
         }
 
-        // Definir as tarefas de transferência *antes* dos blocos condicionais
-        // com um tipo genérico `impl Future<Output = Result<(), Error>>`
-        let client_to_server_task: Box<dyn Future<Output = Result<(), Error>> + Send> ;
-        let server_to_client_task: Box<dyn Future<Output = Result<(), Error>> + Send> ;
+        // Declarar as tarefas de transferência *antes* dos blocos condicionais
+        let client_to_server_task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> ;
+        let server_to_client_task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> ;
 
         if is_http_connect_method {
             let server_stream = TcpStream::connect(&addr_proxy).await
@@ -156,12 +157,12 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             let server_read_arc = Arc::new(Mutex::new(server_read));
             let server_write_arc = Arc::new(Mutex::new(server_write));
             
-            client_to_server_task = Box::new(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
-            server_to_client_task = Box::new(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
+            client_to_server_task = Box::pin(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
+            server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
 
         } else if protocol == "websocket" {
-            let (temp_client_read, temp_client_write) = client_stream.into_split();
-            let ws_client_stream = accept_hdr_async(tokio::net::TcpStream::from_split(temp_client_read, temp_client_write).unwrap(), |req: &Request, mut response: Response| {
+            // A `client_stream` original (mutável) é usada aqui para o handshake.
+            let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, mut response: Response| {
                 println!("Handshake Request Headers do Cliente: {:?}", req.headers());
                 if let Some(user_agent) = req.headers().get("User-Agent") {
                     println!("User-Agent do Cliente: {:?}", user_agent);
@@ -175,10 +176,13 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", addr_proxy, e)))?;
             println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", addr_proxy, response_server.status());
 
+            // Importar Message aqui pois só é usada neste escopo
+            use tokio_tungstenite::tungstenite::Message; 
+
             let (mut client_write_half, mut client_read_half) = ws_client_stream.split(); 
             let (mut server_write_half, mut server_read_half) = ws_server_stream.split(); 
 
-            client_to_server_task = Box::new(async move {
+            client_to_server_task = Box::pin(async move {
                 loop {
                     tokio::select! {
                         res = timeout(Duration::from_secs(config.timeout_secs), client_read_half.next()) => {
@@ -208,7 +212,7 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
                 Ok::<(), Error>(())
             });
 
-            server_to_client_task = Box::new(async move {
+            server_to_client_task = Box::pin(async move {
                 loop {
                     tokio::select! {
                         res = timeout(Duration::from_secs(config.timeout_secs), server_read_half.next()) => {
@@ -257,8 +261,8 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             let server_read_arc = Arc::new(Mutex::new(server_read_half));
             let server_write_arc = Arc::new(Mutex::new(server_write_half));
             
-            client_to_server_task = Box::new(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
-            server_to_client_task = Box::new(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
+            client_to_server_task = Box::pin(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
+            server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
         }
 
         // try_join fora dos blocos para que as variáveis estejam no escopo
@@ -273,134 +277,6 @@ async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<
             Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
         }
     }
-}
-
-// handle_websocket_proxy (ajuste para split de streams)
-// NOTA: Esta função foi consolidada dentro de handle_client na versão acima.
-// Se você ainda tiver uma chamada para `handle_websocket_proxy` separada,
-// esta função é o que ela precisa ser.
-// Vou deixar aqui para referência, mas ela não será mais chamada.
-/*
-async fn handle_websocket_proxy(
-    mut client_stream: TcpStream, // Agora mutável para o split
-    server_addr: &str,
-    config: &Config,
-) -> Result<(), Error> {
-    println!("Iniciando proxy WebSocket para {}", server_addr);
-
-    let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, mut response: Response| {
-        println!("Handshake Request Headers do Cliente: {:?}", req.headers());
-        if let Some(user_agent) = req.headers().get("User-Agent") {
-            println!("User-Agent do Cliente: {:?}", user_agent);
-        }
-        Ok(response)
-    }).await
-    .map_err(|e| Error::new(ErrorKind::Other, format!("Falha no handshake WS do cliente: {}", e)))?;
-    println!("Handshake WebSocket do cliente concluído.");
-
-    let (ws_server_stream, response_server) = connect_async(format!("ws://{}", server_addr)).await
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", server_addr, e)))?;
-    println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", server_addr, response_server.status());
-
-    let (mut client_write_half, mut client_read_half) = ws_client_stream.split(); 
-    let (mut server_write_half, mut server_read_half) = ws_server_stream.split(); 
-
-    let client_to_server_task = async move {
-        loop {
-            tokio::select! {
-                res = timeout(Duration::from_secs(config.timeout_secs), client_read_half.next()) => {
-                    let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do cliente WS"))?;
-                    let msg = match msg_opt {
-                        Some(Ok(m)) => m,
-                        Some(Err(e)) => {
-                            return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do cliente WS: {}", e)));
-                        },
-                        None => {
-                            println!("Cliente WS fechou a conexão.");
-                            break;
-                        },
-                    };
-                    if msg.is_close() {
-                        println!("Cliente WS enviou mensagem de CLOSE.");
-                        server_write_half.send(msg).await
-                            .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para servidor WS: {}", e)))?;
-                        break;
-                    }
-                    if msg.is_ping() { continue; }
-                    server_write_half.send(msg).await
-                        .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para servidor: {}", e)))?;
-                }
-            }
-        }
-        Ok::<(), Error>(())
-    };
-
-    let server_to_client_task = async move {
-        loop {
-            tokio::select! {
-                res = timeout(Duration::from_secs(config.timeout_secs), server_read_half.next()) => {
-                    let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do servidor WS"))?;
-                    let msg = match msg_opt {
-                        Some(Ok(m)) => m,
-                        Some(Err(e)) => {
-                            return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do servidor WS: {}", e)));
-                        },
-                        None => {
-                            println!("Servidor WS fechou a conexão.");
-                            break;
-                        },
-                    };
-                    if msg.is_close() {
-                        println!("Servidor WS enviou mensagem de CLOSE.");
-                        client_write_half.send(msg).await
-                            .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para cliente WS: {}", e)))?;
-                        break;
-                    }
-                    if msg.is_ping() { continue; }
-                    client_write_half.send(msg).await
-                        .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para cliente: {}", e)))?;
-                }
-            }
-        }
-        Ok::<(), Error>(())
-    };
-
-    tokio::try_join!(client_to_server_task, server_to_client_task)?;
-
-    println!("Proxy WebSocket finalizado.");
-    Ok(())
-}
-*/
-
-// --- Funções de transferência TCP genérica ---
-async fn transfer_data(
-    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
-    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    config: &Config,
-) -> Result<(), Error> {
-    let mut buffer = vec![0; 32768];
-    loop {
-        let bytes_read = {
-            let mut read_guard = read_stream.lock().await;
-            match timeout(Duration::from_secs(config.timeout_secs), read_guard.read(&mut buffer)).await {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura TCP")),
-            }
-        };
-
-        if bytes_read == 0 {
-            break;
-        }
-
-        let mut write_guard = write_stream.lock().await;
-        match timeout(Duration::from_secs(config.timeout_secs), write_guard.write_all(&buffer[..bytes_read])).await {
-            Ok(Ok(())) => { /* println!("Transferidos {} bytes", bytes_read); */ },
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita TCP")),
-        }
-    }
-    Ok(())
 }
 
 // `peek_stream` permanece o mesmo (retorna Vec<u8>)
