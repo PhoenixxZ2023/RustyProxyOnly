@@ -4,5 +4,6 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] } # ou "rustls-tls" se preferir
-futures-util = "0.3" # Necessário para o `next()` em Streams
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+hex = "0.4" # <--- ADICIONE ESTA LINHA
