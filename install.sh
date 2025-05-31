@@ -110,7 +110,7 @@ echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚
     cd /root/RustyProxyOnly/RustyProxy || error_exit "Diretório do projeto Rust não encontrado"
     
     # Redireciona a saída da compilação do Cargo
-    cargo build --release --jobs $(nproc) > /dev/null 2>&1 || error_exit "Falha ao compilar o RustyProxy. Verifique logs em caso de erro."
+    cargo build --release --jobs $(nproc) || error_exit "Falha ao compilar o RustyProxy. Verifique logs em caso de erro."
     
     mv ./target/release/RustyProxy /opt/rustyproxy/proxy || error_exit "Falha ao mover o executável compilado"
     increment_step
