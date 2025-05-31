@@ -5,21 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{timeout, Duration};
-use std::future::Future;
-use std::pin::Pin;
-
-// Para logar dados em hexadecimal (precisa de 'hex = "0.4"' no Cargo.toml)
-use hex;
-
-// Importações para tokio-tungstenite
-use tokio_tungstenite::{
-    accept_hdr_async, connect_async,
-    tungstenite::{
-        handshake::server::{Request, Response},
-    },
-};
-use futures_util::StreamExt;
-use futures_util::SinkExt;
 
 // Estrutura para gerenciar configurações
 struct Config {
@@ -27,7 +12,6 @@ struct Config {
     status: String,
     ssh_port: u16,
     openvpn_port: u16,
-    websocket_port: u16,
     timeout_secs: u64,
 }
 
@@ -38,7 +22,6 @@ impl Config {
             status: get_status(),
             ssh_port: 22,
             openvpn_port: 1194,
-            websocket_port: 8081,
             timeout_secs: 1,
         }
     }
@@ -46,31 +29,26 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let config = Arc::new(Config::from_args());
+    // Iniciando o proxy com configurações
+    let config = Config::from_args();
     let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
     println!("Iniciando serviço na porta: {}", config.port);
-    println!("Porta SSH: {}", config.ssh_port);
-    println!("Porta OpenVPN: {}", config.openvpn_port);
-    println!("Porta WebSocket: {}", config.websocket_port);
-    start_proxy(listener, config).await;
+    start_http(listener).await;
     Ok(())
 }
 
-async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
-    let max_connections = Arc::new(Semaphore::new(10000));
+async fn start_http(listener: TcpListener) {
+    // Adiciona máximo de conexões simultâneas
+    let max_connections = Arc::new(Semaphore::new(1000));
 
     loop {
         let permit = max_connections.clone().acquire_owned().await;
         match listener.accept().await {
             Ok((client_stream, addr)) => {
-                let config = config.clone();
                 tokio::spawn(async move {
-                    let _permit = permit;
-                    println!("Nova conexão de {}", addr);
-                    if let Err(e) = handle_client(client_stream, &config).await {
+                    let _permit = permit; // Mantém o permit ativo
+                    if let Err(e) = handle_client(client_stream).await {
                         println!("Erro ao processar cliente {}: {}", addr, e);
-                    } else {
-                        println!("Conexão com {} finalizada", addr);
                     }
                 });
             }
@@ -81,22 +59,66 @@ async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
     }
 }
 
-// --- Funções auxiliares (transfer_data e peek_stream) ---
+async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
+    let config = Config::from_args();
+    // Adiciona timeout para manipulação completa do cliente
+    let result = timeout(Duration::from_secs(30), async {
+        client_stream
+            .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", config.status).as_bytes())
+            .await?;
+
+        let mut buffer = vec![0; 1024];
+        client_stream.read(&mut buffer).await?;
+        client_stream
+            .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", config.status).as_bytes())
+            .await?;
+
+        let addr_proxy = match detect_protocol(&client_stream).await? {
+            "ssh" => format!("0.0.0.0:{}", config.ssh_port),
+            "openvpn" => format!("0.0.0.0:{}", config.openvpn_port),
+            _ => format!("0.0.0.0:{}", config.ssh_port), // Padrão
+        };
+
+        let server_connect = TcpStream::connect(&addr_proxy).await;
+        if server_connect.is_err() {
+            println!("Erro ao iniciar conexão para o proxy {}", addr_proxy);
+            return Ok(());
+        }
+
+        let server_stream = server_connect?;
+
+        let (client_read, client_write) = client_stream.into_split();
+        let (server_read, server_write) = server_stream.into_split();
+
+        let client_read = Arc::new(Mutex::new(client_read));
+        let client_write = Arc::new(Mutex::new(client_write));
+        let server_read = Arc::new(Mutex::new(server_read));
+        let server_write = Arc::new(Mutex::new(server_write));
+
+        let client_to_server = transfer_data(client_read, server_write);
+        let server_to_client = transfer_data(server_read, client_write);
+
+        tokio::try_join!(client_to_server, server_to_client)?;
+        Ok(())
+    }).await;
+
+    if let Err(e) = result {
+        println!("Timeout na manipulação do cliente: {}", e);
+        Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
+    } else {
+        result.unwrap()
+    }
+}
 
 async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    config: &Config,
 ) -> Result<(), Error> {
-    let mut buffer = vec![0; 32768];
+    let mut buffer = [0; 8192];
     loop {
         let bytes_read = {
             let mut read_guard = read_stream.lock().await;
-            match timeout(Duration::from_secs(config.timeout_secs), read_guard.read(&mut buffer)).await {
-                Ok(Ok(n)) => n,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na leitura TCP")),
-            }
+            read_guard.read(&mut buffer).await?
         };
 
         if bytes_read == 0 {
@@ -104,248 +126,62 @@ async fn transfer_data(
         }
 
         let mut write_guard = write_stream.lock().await;
-        match timeout(Duration::from_secs(config.timeout_secs), write_guard.write_all(&buffer[..bytes_read])).await {
-            Ok(Ok(())) => { /* println!("Transferidos {} bytes", bytes_read); */ },
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(Error::new(ErrorKind::TimedOut, "Timeout na escrita TCP")),
-        }
+        write_guard.write_all(&buffer[..bytes_read]).await?;
     }
+
     Ok(())
 }
 
-async fn peek_stream(stream: &TcpStream) -> Result<Vec<u8>, Error> {
-    let mut peek_buffer = vec![0; 4096];
+async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 8192];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
-    Ok(peek_buffer[..bytes_peeked].to_vec())
+    let data = &peek_buffer[..bytes_peeked];
+    let data_str = String::from_utf8_lossy(data);
+    Ok(data_str.to_string())
 }
 
-
-async fn handle_client(mut client_stream: TcpStream, config: &Config) -> Result<(), Error> {
-    let result = timeout(Duration::from_secs(30), async {
-        // Fazer um peek inicial para detectar o protocolo
-        let mut initial_buffer = vec![0; 4096];
-        let bytes_peeked = client_stream.peek(&mut initial_buffer).await?;
-        let initial_data_slice = &initial_buffer[..bytes_peeked]; // Slice para detecção
-        let data_str = String::from_utf8_lossy(initial_data_slice);
-
-        // --- NOVO LOG AQUI: Mostra os dados iniciais recebidos ---
-        println!("\n--- Dados Iniciais do Cliente ({} bytes) ---", bytes_peeked);
-        println!("Texto (UTF-8 Lossy):\n{}", data_str);
-        println!("Hexadecimal:\n{}\n--- Fim Dados Iniciais ---\n", hex::encode(initial_data_slice));
-        // --- FIM NOVO LOG ---
-
-        let mut protocol = "unknown";
-        let mut addr_proxy = format!("0.0.0.0:{}", config.ssh_port); // Fallback padrão
-        let mut is_http_connect_method = false; // Flag para método CONNECT
-
-        // Lógica de detecção de protocolos, reordenada para prioridade
-        if data_str.starts_with("CONNECT ") { // Detecção do método CONNECT
-            let parts: Vec<&str> = data_str.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let host_port_str = parts[1];
-                // Tenta parsear host e porta do CONNECT
-                if let Some((host, port_str)) = host_port_str.rsplit_once(':') {
-                    if let Ok(port) = port_str.parse::<u16>() {
-                        addr_proxy = format!("{}:{}", host, port);
-                        protocol = "http_connect";
-                        is_http_connect_method = true; // Seta a flag
-                        println!("Protocolo detectado: HTTP CONNECT para {}. Encaminhando para: {}", host_port_str, addr_proxy);
-                    }
-                }
-            }
-        } else if data_str.contains("Upgrade: websocket") && 
-                  (data_str.starts_with("GET ") || data_str.starts_with("POST ") || data_str.starts_with("CONNECT ")) {
-            protocol = "websocket";
-            addr_proxy = format!("0.0.0.0:{}", config.websocket_port);
-            println!("Protocolo detectado: WebSocket. Encaminhando para: {}", addr_proxy);
-        } else if data_str.starts_with("SSH-2.0-") {
-            protocol = "ssh";
-            addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
-            println!("Protocolo detectado: SSH. Encaminhando para: {}", addr_proxy);
-        } else if initial_data_slice.len() >= 2 && initial_data_slice[0] == 0x00 && initial_data_slice[1] >= 0x14 {
-            protocol = "openvpn";
-            addr_proxy = format!("0.0.0.0:{}", config.openvpn_port);
-            println!("Protocolo detectado: OpenVPN. Encaminhando para: {}", addr_proxy);
-        } else if data_str.starts_with("GET ") || data_str.starts_with("POST ") || data_str.starts_with("HTTP/1.") {
-            protocol = "http_other";
-            addr_proxy = format!("0.0.0.0:{}", config.ssh_port); 
-            println!("Protocolo detectado: HTTP (GET/POST/etc). Encaminhando para: {}", addr_proxy);
-        } else if initial_data_slice.is_empty() {
-            println!("Nenhum dado recebido, assumindo SSH.");
-            protocol = "ssh";
-            addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
-        } else {
-            println!("Protocolo desconhecido (dados iniciais: {:?}). Assumindo SSH.", data_str);
-            protocol = "ssh";
-            addr_proxy = format!("0.0.0.0:{}", config.ssh_port);
-        }
-
-        // Declarar as tarefas de transferência *antes* dos blocos condicionais
-        let client_to_server_task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> ;
-        let server_to_client_task: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>> ;
-
-        if is_http_connect_method {
-            let mut server_stream = TcpStream::connect(&addr_proxy).await 
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao destino HTTP CONNECT {}: {}", addr_proxy, e)))?;
-
-            let response = b"HTTP/1.1 200 Connection established\r\n\r\n";
-            client_stream.write_all(response).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar resposta HTTP CONNECT para o cliente: {}", e)))?;
-
-            let mut dummy_read_buffer = vec![0; bytes_peeked];
-            client_stream.read_exact(&mut dummy_read_buffer).await?; 
-
-            let (client_read, client_write) = client_stream.into_split();
-            let (server_read, server_write) = server_stream.into_split();
-
-            let client_read_arc = Arc::new(Mutex::new(client_read));
-            let client_write_arc = Arc::new(Mutex::new(client_write));
-            let server_read_arc = Arc::new(Mutex::new(server_read));
-            let server_write_arc = Arc::new(Mutex::new(server_write));
-            
-            client_to_server_task = Box::pin(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
-            server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
-
-        } else if protocol == "websocket" {
-            let ws_client_stream = accept_hdr_async(client_stream, |req: &Request, response: Response| { 
-                println!("Handshake Request Headers do Cliente: {:?}", req.headers());
-                if let Some(user_agent) = req.headers().get("User-Agent") {
-                    println!("User-Agent do Cliente: {:?}", user_agent);
-                }
-                Ok(response)
-            }).await
-            .map_err(|e| Error::new(ErrorKind::Other, format!("Falha no handshake WS do cliente: {}", e)))?;
-            println!("Handshake WebSocket do cliente concluído.");
-
-            let (ws_server_stream, response_server) = connect_async(format!("ws://{}", addr_proxy)).await
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Falha ao conectar ao servidor WS de backend {}: {}", addr_proxy, e)))?;
-            println!("Conectado ao servidor WebSocket de backend: {}. Resposta do servidor: {:?}", addr_proxy, response_server.status());
-
-            use tokio_tungstenite::tungstenite::Message; // Importar Message aqui pois só é usada neste escopo
-
-            let (mut client_write_half, mut client_read_half) = ws_client_stream.split(); 
-            let (mut server_write_half, mut server_read_half) = ws_server_stream.split(); 
-
-            client_to_server_task = Box::pin(async move {
-                loop {
-                    tokio::select! {
-                        res = timeout(Duration::from_secs(config.timeout_secs), client_read_half.next()) => {
-                            let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do cliente WS"))?;
-                            let msg = match msg_opt {
-                                Some(Ok(m)) => m,
-                                Some(Err(e)) => {
-                                    return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do cliente WS: {}", e)));
-                                },
-                                None => {
-                                    println!("Cliente WS fechou a conexão.");
-                                    break;
-                                },
-                            };
-                            if msg.is_close() {
-                                println!("Cliente WS enviou mensagem de CLOSE.");
-                                server_write_half.send(msg).await
-                                    .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para servidor WS: {}", e)))?;
-                                break;
-                            }
-                            if msg.is_ping() { continue; }
-                            server_write_half.send(msg).await
-                                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para servidor: {}", e)))?;
-                        }
-                    }
-                }
-                Ok::<(), Error>(())
-            });
-
-            server_to_client_task = Box::pin(async move {
-                loop {
-                    tokio::select! {
-                        res = timeout(Duration::from_secs(config.timeout_secs), server_read_half.next()) => {
-                            let msg_opt = res.map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout na leitura do servidor WS"))?;
-                            let msg = match msg_opt {
-                                Some(Ok(m)) => m,
-                                Some(Err(e)) => {
-                                    return Err(Error::new(ErrorKind::Other, format!("Erro ao ler mensagem do servidor WS: {}", e)));
-                                },
-                                None => {
-                                    println!("Servidor WS fechou a conexão.");
-                                    break;
-                                },
-                            };
-                            if msg.is_close() {
-                                println!("Servidor WS enviou mensagem de CLOSE.");
-                                client_write_half.send(msg).await
-                                    .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar CLOSE para cliente WS: {}", e)))?;
-                                break;
-                            }
-                            if msg.is_ping() { continue; }
-                            client_write_half.send(msg).await
-                                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao enviar mensagem WS para cliente: {}", e)))?;
-                        }
-                    }
-                }
-                Ok::<(), Error>(())
-            });
-
-        } else {
-            let mut server_stream = TcpStream::connect(&addr_proxy).await 
-                .map_err(|e| Error::new(ErrorKind::Other, format!("Erro ao conectar ao proxy {}: {}", addr_proxy, e)))?;
-
-            let initial_data_to_send = initial_data_slice.to_vec(); // Cria uma CÓPIA dos dados
-            
-            let mut dummy_read_buffer = vec![0; bytes_peeked];
-            client_stream.read_exact(&mut dummy_read_buffer).await?; 
-
-            server_stream.write_all(&initial_data_to_send).await?; 
-
-            let (client_read_half, client_write_half) = client_stream.into_split();
-            let (server_read_half, server_write_half) = server_stream.into_split();
-
-            let client_read_arc = Arc::new(Mutex::new(client_read_half));
-            let client_write_arc = Arc::new(Mutex::new(client_write_half));
-            let server_read_arc = Arc::new(Mutex::new(server_read_half));
-            let server_write_arc = Arc::new(Mutex::new(server_write_half));
-            
-            client_to_server_task = Box::pin(transfer_data(client_read_arc.clone(), server_write_arc.clone(), config));
-            server_to_client_task = Box::pin(transfer_data(server_read_arc.clone(), client_write_arc.clone(), config));
-        }
-
-        // try_join fora dos blocos para que as variáveis estejam no escopo
-        tokio::try_join!(client_to_server_task, server_to_client_task)?;
-        Ok(())
-    }).await;
-
-    match result {
-        Ok(res) => res,
-        Err(e) => {
-            println!("Timeout na manipulação do cliente: {}", e);
-            Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
-        }
+async fn detect_protocol(stream: &TcpStream) -> Result<&'static str, Error> {
+    let config = Config::from_args();
+    let data = timeout(Duration::from_secs(config.timeout_secs), peek_stream(stream))
+        .await
+        .unwrap_or_else(|_| Ok(String::new()))?;
+    if data.contains("SSH") {
+        Ok("ssh")
+    } else if data.contains("HTTP") {
+        Ok("http")
+    } else if data.is_empty() {
+        Ok("ssh") // Padrão para SSH
+    } else {
+        Ok("openvpn")
     }
 }
 
 fn get_port() -> u16 {
     let args: Vec<String> = env::args().collect();
     let mut port = 80;
+
     for i in 1..args.len() {
         if args[i] == "--port" {
             if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or_else(|_| {
-                    eprintln!("Aviso: Porta inválida, usando 80.");
-                    80
-                });
+                port = args[i + 1].parse().unwrap_or(80);
             }
         }
     }
+
     port
 }
 
 fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
     let mut status = String::from("@RustyManager");
+
     for i in 1..args.len() {
-        if i + 1 < args.len() && args[i] == "--status" {
-            status = args[i + 1].clone();
+        if args[i] == "--status" {
+            if i + 1 < args.len() {
+                status = args[i + 1].clone();
+            }
         }
     }
+
     status
 }
