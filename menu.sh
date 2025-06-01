@@ -64,16 +64,13 @@ is_port_in_use() {
 del_proxy_port() {
     local port=$1
 
-    systemctl disable "proxy${port}.service"
-    systemctl stop "proxy${port}.service"
-    rm -f "/etc/systemd/system/proxy${port}.service"
-    systemctl daemon-reload
+    sudo systemctl disable "proxy${port}.service"
+    sudo systemctl stop "proxy${port}.service"
+    sudo rm -f "/etc/systemd/system/proxy${port}.service"
+    sudo systemctl daemon-reload
 
-    if lsof -i :"$port" &>/dev/null; then
-        fuser -k "$port"/tcp 2>/dev/null
-    fi
-
-    sed -i "/^$port|/d" "$PORTS_FILE"
+    # Remover a porta do arquivo
+    sed -i "/^$port$/d" "$PORTS_FILE"
     echo -e "${GREEN}✅ PORTA $port FECHADA COM SUCESSO.${RESET}"
 }
 
