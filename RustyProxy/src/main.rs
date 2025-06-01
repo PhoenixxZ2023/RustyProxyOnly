@@ -10,13 +10,14 @@ use tokio::time::{timeout, Duration};
 #[derive(Debug, Clone)]
 struct Config {
     port: u16,
-    status: String,
+    status: String, // Usado se send_initial_proxy_handshake for true
     ssh_target_addr: String,
     openvpn_target_addr: String,
     http_target_addr: String,
-    websocket_target_addr: String, // Novo para WebSocket
+    websocket_target_addr: String,
     peek_timeout_secs: u64,
     client_handling_timeout_secs: u64,
+    send_initial_proxy_handshake: bool, // Novo campo para controlar o handshake inicial
 }
 
 impl Config {
@@ -27,9 +28,10 @@ impl Config {
         let mut ssh_target_addr = String::from("0.0.0.0:22");
         let mut openvpn_target_addr = String::from("0.0.0.0:1194");
         let mut http_target_addr = String::from("0.0.0.0:8080");
-        let mut websocket_target_addr = String::from("0.0.0.0:8081"); // Padrão para WebSocket backend
+        let mut websocket_target_addr = String::from("0.0.0.0:8081");
         let mut peek_timeout_secs = 2;
         let mut client_handling_timeout_secs = 30;
+        let mut send_initial_proxy_handshake = false; // Desabilitado por padrão
 
         let mut i = 1;
         while i < args.len() {
@@ -39,25 +41,33 @@ impl Config {
                 "--ssh-target" => if i + 1 < args.len() { ssh_target_addr = args[i + 1].clone(); i += 1; },
                 "--ovpn-target" => if i + 1 < args.len() { openvpn_target_addr = args[i + 1].clone(); i += 1; },
                 "--http-target" => if i + 1 < args.len() { http_target_addr = args[i + 1].clone(); i += 1; },
-                "--ws-target" => if i + 1 < args.len() { websocket_target_addr = args[i + 1].clone(); i += 1; }, // Novo arg
+                "--ws-target" => if i + 1 < args.len() { websocket_target_addr = args[i + 1].clone(); i += 1; },
                 "--peek-timeout" => if i + 1 < args.len() { peek_timeout_secs = args[i + 1].parse().unwrap_or(peek_timeout_secs); i += 1; },
                 "--client-timeout" => if i + 1 < args.len() { client_handling_timeout_secs = args[i+1].parse().unwrap_or(client_handling_timeout_secs); i += 1; },
+                "--enable-initial-proxy-handshake" => { // Novo argumento
+                    send_initial_proxy_handshake = true;
+                    // Este argumento é um flag, não precisa de i += 1; para valor
+                }
                 _ => {}
             }
             i += 1;
         }
-        Config { port, status, ssh_target_addr, openvpn_target_addr, http_target_addr, websocket_target_addr, peek_timeout_secs, client_handling_timeout_secs }
+        Config {
+            port, status, ssh_target_addr, openvpn_target_addr, http_target_addr,
+            websocket_target_addr, peek_timeout_secs, client_handling_timeout_secs,
+            send_initial_proxy_handshake // Incluir o novo campo
+        }
     }
 }
 
-// Enum para o tipo de requisição detectada
+// Enum para o tipo de requisição detectada (sem alteração aqui)
 #[derive(Debug)]
 enum DetectedRequestType {
     Ssh,
     OpenVpn,
     HttpConnect { host: String, port: u16 },
     HttpPlain,
-    WebSocketUpgrade, // Nova variante
+    WebSocketUpgrade,
     Unknown,
 }
 
@@ -96,6 +106,24 @@ async fn start_http(listener: TcpListener, config: Arc<Config>) {
 
 async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Result<(), Error> {
     let result = timeout(Duration::from_secs(config.client_handling_timeout_secs), async {
+        
+        // --- Adicionar handshake inicial condicional AQUI ---
+        if config.send_initial_proxy_handshake {
+            println!("Enviando handshake inicial do proxy (101 e 200) para o cliente.");
+            // Envia HTTP/1.1 101 {status}
+            if let Err(e) = client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", &config.status).as_bytes()).await {
+                println!("Erro ao enviar handshake inicial 101: {}", e);
+                return Err(e);
+            }
+            // Envia HTTP/1.1 200 {status}
+            if let Err(e) = client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", &config.status).as_bytes()).await {
+                println!("Erro ao enviar handshake inicial 200: {}", e);
+                return Err(e);
+            }
+            // Opcional: client_stream.flush().await?;
+        }
+        // --- Fim do handshake inicial condicional ---
+
         // Realizar o peek dos dados iniciais do cliente aqui
         let mut peek_buffer = vec![0; 2048]; // Buffer para peek
         let bytes_peeked = match timeout(Duration::from_secs(config.peek_timeout_secs), client_stream.peek(&mut peek_buffer)).await {
@@ -111,15 +139,16 @@ async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Res
         };
 
         if bytes_peeked == 0 {
-            println!("Nenhum dado recebido do cliente no peek inicial. Fechando conexão.");
-            return Ok(()); // Cliente desconectou ou não enviou dados
+            if config.send_initial_proxy_handshake {
+                 println!("Cliente desconectou ou não enviou dados após o handshake inicial do proxy.");
+            } else {
+                 println!("Nenhum dado recebido do cliente no peek inicial. Fechando conexão.");
+            }
+            return Ok(()); 
         }
         let actual_peek_data = &peek_buffer[..bytes_peeked];
-
-        // Chamar detect_protocol com os dados "espiados"
-        // detect_protocol agora é síncrona, pois só analisa o buffer
+        
         let detected_type = detect_protocol(actual_peek_data);
-
         println!("Tipo de requisição detectada: {:?}", detected_type);
 
         match detected_type {
@@ -145,16 +174,11 @@ async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Res
                 println!("Processando WebSocket Upgrade para: {}", config.websocket_target_addr);
                 match TcpStream::connect(&config.websocket_target_addr).await {
                     Ok(mut server_stream) => {
-                        // Enviar a requisição original de upgrade (peek_data) para o servidor WebSocket backend
                         server_stream.write_all(actual_peek_data).await?;
-                        // Agora o backend WebSocket responderá com 101 Switching Protocols (ou erro)
-                        // e então pipe_streams encaminhará tudo.
                         pipe_streams(client_stream, server_stream).await
                     }
                     Err(e) => {
                         eprintln!("Falha ao conectar ao backend WebSocket {}: {}", config.websocket_target_addr, e);
-                        // Poderia enviar um erro HTTP 50x ao cliente aqui também, se apropriado
-                        // antes de fechar a conexão.
                         let response = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                         client_stream.write_all(response).await.unwrap_or_else(|write_err| {
                             println!("Erro ao enviar resposta 503 ao cliente: {}", write_err);
@@ -176,7 +200,6 @@ async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Res
             DetectedRequestType::HttpPlain => {
                 println!("Redirecionando para HTTP Plain: {}", config.http_target_addr);
                 let mut server_stream = TcpStream::connect(&config.http_target_addr).await?;
-                // Enviar os dados já "espiados" para o servidor HTTP, pois ele espera a requisição completa
                 server_stream.write_all(actual_peek_data).await?;
                 pipe_streams(client_stream, server_stream).await
             }
@@ -230,7 +253,6 @@ async fn transfer_data(
     Ok(())
 }
 
-// detect_protocol agora é síncrona e apenas analisa o buffer fornecido
 fn detect_protocol(peek_data: &[u8]) -> DetectedRequestType {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
@@ -255,8 +277,7 @@ fn detect_protocol(peek_data: &[u8]) -> DetectedRequestType {
                      println!("CONNECT sem path.");
                      return DetectedRequestType::Unknown;
                 }
-            } else if req.method.is_some() { // Se tem um método, é algum tipo de HTTP
-                // Verificar por upgrade WebSocket
+            } else if req.method.is_some() { 
                 let mut is_websocket_upgrade = false;
                 let mut connection_has_upgrade = false;
                 for header in req.headers.iter() {
@@ -265,7 +286,6 @@ fn detect_protocol(peek_data: &[u8]) -> DetectedRequestType {
                             is_websocket_upgrade = true;
                         }
                     } else if header.name.eq_ignore_ascii_case("Connection") {
-                        // Connection header pode ter múltiplos valores, ex: "keep-alive, Upgrade"
                         if String::from_utf8_lossy(header.value)
                             .split(',')
                             .any(|val| val.trim().eq_ignore_ascii_case("Upgrade"))
@@ -278,15 +298,12 @@ fn detect_protocol(peek_data: &[u8]) -> DetectedRequestType {
                 if is_websocket_upgrade && connection_has_upgrade {
                     return DetectedRequestType::WebSocketUpgrade;
                 } else {
-                    return DetectedRequestType::HttpPlain; // Outro método HTTP
+                    return DetectedRequestType::HttpPlain;
                 }
-            } else {
-                // Parcial, mas sem método ainda. Pode ser SSH ou OpenVPN.
             }
         }
         Err(_e) => {
-            // Não é HTTP, ou é malformado. Continuar para outras verificações.
-            // println!("Erro ao parsear HTTP (pode ser outro protocolo): {:?}", e);
+            // Não é HTTP, ou é malformado.
         }
     }
 
@@ -294,7 +311,5 @@ fn detect_protocol(peek_data: &[u8]) -> DetectedRequestType {
         return DetectedRequestType::Ssh;
     }
     
-    // Fallback se não for HTTP nem SSH
-    // println!("Não detectado como HTTP ou SSH, assumindo OpenVPN/Default.");
     DetectedRequestType::OpenVpn
 }
