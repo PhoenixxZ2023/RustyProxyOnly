@@ -1,8 +1,3 @@
-// Adicione ao seu Cargo.toml:
-// [dependencies]
-// tokio = { version = "1", features = ["full"] }
-// httparse = "1.8"
-
 use std::env;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
