@@ -27,7 +27,7 @@ impl Config {
         let mut ssh_target_addr = String::from("0.0.0.0:22");
         let mut openvpn_target_addr = String::from("0.0.0.0:1194");
         let mut http_target_addr = String::from("0.0.0.0:8080"); // Padrão para HTTP
-        let mut peek_timeout_secs = 1;
+        let mut peek_timeout_secs = 2;
         let mut client_handling_timeout_secs = 30;
 
         let mut i = 1;
@@ -143,7 +143,7 @@ async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Res
             .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", config.status).as_bytes())
             .await?;
 
-        let mut buffer = vec![0; 1024]; // Buffer para a leitura inicial do cliente
+        let mut buffer = vec![0; 2048]; // Buffer para a leitura inicial do cliente
         client_stream.read(&mut buffer).await?; // Lê dados do cliente (ex: após um CONNECT)
 
         client_stream
@@ -198,7 +198,7 @@ async fn transfer_data(
     read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
     write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 ) -> Result<(), Error> {
-    let mut buffer = [0; 8192]; // Buffer de 8KB para transferência
+    let mut buffer = [0; 32768]; // Buffer de 8KB para transferência
     loop {
         let bytes_read = {
             let mut read_guard = read_stream.lock().await;
@@ -217,7 +217,7 @@ async fn transfer_data(
 
 // Função auxiliar para espiar o stream (peek)
 async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 8192]; // Buffer para peek
+    let mut peek_buffer = vec![0; 32768]; // Buffer para peek
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     Ok(String::from_utf8_lossy(data).to_string())
