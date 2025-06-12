@@ -4,8 +4,8 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
-tokio-websockets = { version = "0.11", features = ["client", "server", "ring", "getrandom"] } # Atualizado para 0.11
+tokio-websockets = { version = "0.11", features = ["client", "server", "ring", "getrandom"] }
 httparse = "1.8"
 http = "1.0"
 bytes = "1.0"
-futures-util = { version = "0.3", features = ["sink", "io-util"] } # Adicionado explicitamente com features necessárias
+futures-util = "0.3" # Corrigido: Apenas a versão, sem features adicionais.
