@@ -6,10 +6,14 @@ use tokio::{time::Duration};
 use tokio::time::timeout;
 
 // Novas importações para WebSocket e parsing HTTP
-use tokio_websockets::{Message, WebSocketStream};
-use http::Uri; // Para criar a URI do servidor WebSocket de destino
-use bytes::BytesMut; // Buffer mutável para leitura
-use httparse::{Request, EMPTY_HEADER}; // Para parsing de cabeçalhos HTTP
+use tokio_websockets::{Message, WebSocketStream}; // Warning: unused imports: `Message` e `WebSocketStream` ainda podem aparecer se não forem usadas diretamente no topo
+use http::Uri;
+use bytes::BytesMut;
+use httparse::{Request, EMPTY_HEADER};
+
+// Importações para split do stream do futures-util
+use futures_util::{StreamExt, SinkExt};
+use tokio_websockets::ServerBuilder; // Para accept_with_config
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -48,7 +52,10 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     let mut headers = [EMPTY_HEADER; 16];
     let mut req = Request::new(&mut headers);
-    let parse_status = req.parse(&buf)?;
+    
+    // --- Correção do Erro 2: Conversão de httparse::Error ---
+    let parse_status = req.parse(&buf)
+        .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, format!("Erro de parsing HTTP: {}", e)))?;
 
     let is_websocket_upgrade = if let httparse::Status::Complete(offset) = parse_status {
         let mut upgrade_found = false;
@@ -64,9 +71,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         }
         upgrade_found && connection_upgrade_found
     } else {
-        // Se a requisição não estiver completa ou for um erro de parsing,
-        // assume que não é um upgrade de WebSocket por enquanto
-        false
+        false // Se a requisição não estiver completa ou for um erro de parsing, assume que não é WebSocket
     };
 
     if is_websocket_upgrade {
@@ -77,19 +82,12 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     } else {
         // Lógica existente para SSH/OpenVPN (se não for WebSocket)
         let status = get_status();
-        // A lógica de enviar 101 e 200 aqui pode ser estranha para não-WebSockets,
-        // mas estou mantendo sua lógica original.
         client_stream
             .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
             .await?;
 
-        // Consumir o resto do buffer ou aguardar mais dados se o cliente não enviou tudo de uma vez.
-        // CUIDADO: O 'peek_stream' e a leitura de buffer aqui podem conflitar com o
-        // 'read_buf' inicial se a requisição HTTP inicial não preencher o buffer completamente.
-        // O ideal é que o `handle_client` ou encaminhe o `client_stream` limpo,
-        // ou você re-avalie a necessidade dessas linhas para não-WebSocket.
         let mut remaining_buffer = vec![0; 1024];
-        client_stream.read(&mut remaining_buffer).await?; // Lê qualquer coisa que sobrou ou próximo pacote
+        client_stream.read(&mut remaining_buffer).await?;
         
         client_stream
             .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
@@ -135,16 +133,17 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
-// --- Nova Função: handle_websocket_proxy ---
 async fn handle_websocket_proxy(
     client_tcp_stream: TcpStream,
     initial_data: bytes::Bytes, // Dados iniciais da requisição HTTP já lida
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // 1. Converter o TcpStream do cliente em um WebSocketStream.
-    // Usamos `accept_with_buffer` para incluir os dados HTTP que já lemos.
-    let ws_client_stream = match tokio_websockets::accept_with_buffer(client_tcp_stream, initial_data).await {
+    // --- Correção do Erro 1: Usar accept_with_config ---
+    let ws_client_stream = match ServerBuilder::new()
+        .accept_with_buffer(client_tcp_stream, initial_data)
+        .await
+    {
         Ok(ws) => ws,
         Err(e) => {
             println!("Erro no handshake WebSocket com o cliente: {}", e);
@@ -153,8 +152,6 @@ async fn handle_websocket_proxy(
     };
     println!("Handshake WebSocket com cliente concluído.");
 
-    // 2. Conectar-se ao servidor WebSocket de destino.
-    // Você pode configurar a porta de destino aqui.
     let ws_target_addr = "ws://127.0.0.1:8081"; // Exemplo: seu servidor WebSocket real está na porta 8081
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
@@ -167,7 +164,7 @@ async fn handle_websocket_proxy(
     };
     println!("Conectado ao servidor WebSocket de destino: {}", ws_target_addr);
 
-    // 3. Encaminhar frames WebSocket entre os dois streams.
+    // --- Correção do Erro 3: Usar split() de futures_util::StreamExt/SinkExt ---
     let (mut ws_client_write, mut ws_client_read) = ws_client_stream.split();
     let (mut ws_server_write, mut ws_server_read) = ws_server_stream.split();
 
@@ -176,7 +173,6 @@ async fn handle_websocket_proxy(
         while let Some(msg_result) = ws_client_read.next().await {
             match msg_result {
                 Ok(msg) => {
-                    //println!("Cliente -> Servidor (WS): {:?}", msg); // Para depuração
                     if let Err(e) = ws_server_write.send(msg).await {
                         println!("Erro ao enviar msg do cliente para o servidor WS: {}", e);
                         break;
@@ -189,7 +185,7 @@ async fn handle_websocket_proxy(
             }
         }
         println!("Conexão WS cliente -> servidor encerrada.");
-        Ok::<(), Error>(()) // Retorna Ok(())
+        Ok::<(), Error>(())
     });
 
     // Tarefa: Servidor -> Cliente (WebSocket)
@@ -197,7 +193,6 @@ async fn handle_websocket_proxy(
         while let Some(msg_result) = ws_server_read.next().await {
             match msg_result {
                 Ok(msg) => {
-                    //println!("Servidor -> Cliente (WS): {:?}", msg); // Para depuração
                     if let Err(e) = ws_client_write.send(msg).await {
                         println!("Erro ao enviar msg do servidor para o cliente WS: {}", e);
                         break;
@@ -210,18 +205,15 @@ async fn handle_websocket_proxy(
             }
         }
         println!("Conexão WS servidor -> cliente encerrada.");
-        Ok::<(), Error>(()) // Retorna Ok(())
+        Ok::<(), Error>(())
     });
 
-    // Esperar que ambas as direções da comunicação terminem
     tokio::try_join!(client_to_server_ws, server_to_client_ws)?;
 
     Ok(())
 }
 
-
-// Funções existentes (sem mudanças, exceto que 'peek_stream' e 'transfer_data'
-// são usadas apenas no caminho não-WebSocket agora)
+// Funções existentes
 async fn transfer_data(
     mut read_stream: tokio::net::tcp::OwnedReadHalf,
     mut write_stream: tokio::net::tcp::OwnedWriteHalf,
