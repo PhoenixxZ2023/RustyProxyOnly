@@ -5,15 +5,18 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::{time::Duration};
 use tokio::time::timeout;
 
-// Novas importações para WebSocket e parsing HTTP
-use tokio_websockets::{Message, WebSocketStream}; // Warning: unused imports: `Message` e `WebSocketStream` ainda podem aparecer se não forem usadas diretamente no topo
+// Importações para WebSocket e parsing HTTP
+use tokio_websockets::{Message, WebSocketStream};
 use http::Uri;
 use bytes::BytesMut;
 use httparse::{Request, EMPTY_HEADER};
 
-// Importações para split do stream do futures-util
-use futures_util::{StreamExt, SinkExt};
-use tokio_websockets::ServerBuilder; // Para accept_with_config
+// Importações corretas para split do stream (garantindo que os traits estejam no escopo)
+use futures_util::stream::{StreamExt, SplitStream}; // Para o lado da leitura
+use futures_util::sink::{SinkExt, SplitSink};     // Para o lado da escrita
+// Também precisamos do ServerBuilder para accept_with_buffer
+use tokio_websockets::ServerBuilder;
+
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -42,18 +45,16 @@ async fn start_http(listener: TcpListener) {
 }
 
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    let mut buf = BytesMut::with_capacity(4096); // Buffer para a requisição HTTP inicial
+    let mut buf = BytesMut::with_capacity(4096);
 
-    // Tenta ler a requisição HTTP inicial do cliente
     let bytes_read = client_stream.read_buf(&mut buf).await?;
     if bytes_read == 0 {
-        return Ok(()); // Cliente desconectou
+        return Ok(());
     }
 
     let mut headers = [EMPTY_HEADER; 16];
     let mut req = Request::new(&mut headers);
     
-    // --- Correção do Erro 2: Conversão de httparse::Error ---
     let parse_status = req.parse(&buf)
         .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, format!("Erro de parsing HTTP: {}", e)))?;
 
@@ -71,16 +72,14 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         }
         upgrade_found && connection_upgrade_found
     } else {
-        false // Se a requisição não estiver completa ou for um erro de parsing, assume que não é WebSocket
+        false
     };
 
     if is_websocket_upgrade {
         println!("Detectado Handshake WebSocket!");
-        // Chamar a função para proxy WebSocket
-        // 'buf' contém a requisição HTTP inicial que precisamos para o handshake
-        handle_websocket_proxy(client_stream, buf.freeze()).await?; // 'freeze' para converter BytesMut em Bytes
+        // O `buf.freeze()` cria um `bytes::Bytes` que é imutável e eficiente.
+        handle_websocket_proxy(client_stream, buf.freeze()).await?;
     } else {
-        // Lógica existente para SSH/OpenVPN (se não for WebSocket)
         let status = get_status();
         client_stream
             .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
@@ -139,7 +138,7 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // --- Correção do Erro 1: Usar accept_with_config ---
+    // Utiliza ServerBuilder para chamar accept_with_buffer
     let ws_client_stream = match ServerBuilder::new()
         .accept_with_buffer(client_tcp_stream, initial_data)
         .await
@@ -152,7 +151,7 @@ async fn handle_websocket_proxy(
     };
     println!("Handshake WebSocket com cliente concluído.");
 
-    let ws_target_addr = "ws://127.0.0.1:8081"; // Exemplo: seu servidor WebSocket real está na porta 8081
+    let ws_target_addr = "ws://127.0.0.1:8081";
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
     let (ws_server_stream, _response) = match tokio_websockets::ClientBuilder::from_uri(uri).connect().await {
@@ -164,11 +163,10 @@ async fn handle_websocket_proxy(
     };
     println!("Conectado ao servidor WebSocket de destino: {}", ws_target_addr);
 
-    // --- Correção do Erro 3: Usar split() de futures_util::StreamExt/SinkExt ---
+    // Agora o split correto, usando os traits importados
     let (mut ws_client_write, mut ws_client_read) = ws_client_stream.split();
     let (mut ws_server_write, mut ws_server_read) = ws_server_stream.split();
 
-    // Tarefa: Cliente -> Servidor (WebSocket)
     let client_to_server_ws = tokio::spawn(async move {
         while let Some(msg_result) = ws_client_read.next().await {
             match msg_result {
@@ -188,7 +186,6 @@ async fn handle_websocket_proxy(
         Ok::<(), Error>(())
     });
 
-    // Tarefa: Servidor -> Cliente (WebSocket)
     let server_to_client_ws = tokio::spawn(async move {
         while let Some(msg_result) = ws_server_read.next().await {
             match msg_result {
@@ -213,7 +210,6 @@ async fn handle_websocket_proxy(
     Ok(())
 }
 
-// Funções existentes
 async fn transfer_data(
     mut read_stream: tokio::net::tcp::OwnedReadHalf,
     mut write_stream: tokio::net::tcp::OwnedWriteHalf,
