@@ -1,7 +1,8 @@
 use clap::Parser;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+// CORREÇÃO 1: Removido o 'AsyncReadExt' não utilizado
+use tokio::io::{self, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
@@ -120,10 +121,9 @@ async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Res
         })?;
 
         // 5. Transfere os dados de forma bidirecional
-        let (mut client_read, mut client_write) = client_stream.split();
-        let (mut server_read, mut server_write) = server_stream.split();
-
-        match io::copy_bidirectional(&mut client_read, &mut server_read).await {
+        
+        // CORREÇÃO 2: Removidas as chamadas .split() e passamos os streams completos.
+        match io::copy_bidirectional(&mut client_stream, &mut server_stream).await {
             Ok((to_server, to_client)) => {
                 info!(
                     "Transferência concluída. Bytes para o servidor: {}, Bytes para o cliente: {}",
@@ -159,7 +159,7 @@ fn detect_protocol<'a>(data: &[u8], config: &'a Config) -> &'a str {
         || request_str.starts_with("PUT")
         || request_str.starts_with("DELETE")
         || request_str.starts_with("HEAD")
-        || request_str.starts_with("ACL") // >>> LINHA ADICIONADA <<<
+        || request_str.starts_with("ACL")
     {
         info!("Protocolo detectado: HTTP");
         return &config.http_target_addr;
