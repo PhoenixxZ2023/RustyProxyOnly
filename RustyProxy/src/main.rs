@@ -1,244 +1,173 @@
-use std::env;
+use clap::Parser;
 use std::io::{Error, ErrorKind};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
+use tracing::{error, info, warn};
+use tracing_subscriber;
 
-// Estrutura para gerenciar configurações
-#[derive(Debug, Clone)] // Adicionado Clone para facilitar
+// Estrutura para gerenciar configurações usando clap para parsing de argumentos
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
 struct Config {
+    #[arg(long, default_value_t = 80)]
     port: u16,
+
+    #[arg(long, default_value = "@RustyManager")]
     status: String,
-    ssh_target_addr: String,    // Modificado para String completa (IP:Porta)
-    openvpn_target_addr: String, // Modificado para String completa
-    http_target_addr: String,   // Novo para HTTP, String completa
-    peek_timeout_secs: u64,    // Timeout para peek_stream
-    client_handling_timeout_secs: u64, // Timeout para todo o handle_client
-}
 
-impl Config {
-    fn from_args() -> Self {
-        let args: Vec<String> = env::args().collect();
+    #[arg(long, default_value = "127.0.0.1:22")]
+    ssh_target_addr: String,
 
-        let mut port = 80;
-        let mut status = String::from("@RustyManager");
-        let mut ssh_target_addr = String::from("0.0.0.0:22");
-        let mut openvpn_target_addr = String::from("0.0.0.0:1194");
-        let mut http_target_addr = String::from("0.0.0.0:8080"); // Padrão para HTTP
-        let mut peek_timeout_secs = 2;
-        let mut client_handling_timeout_secs = 30;
+    #[arg(long, default_value = "127.0.0.1:1194")]
+    openvpn_target_addr: String,
 
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--port" => {
-                    if i + 1 < args.len() {
-                        port = args[i + 1].parse().unwrap_or(port);
-                        i += 1;
-                    }
-                }
-                "--status" => {
-                    if i + 1 < args.len() {
-                        status = args[i + 1].clone();
-                        i += 1;
-                    }
-                }
-                "--ssh-target" => { // Ex: --ssh-target 127.0.0.1:22
-                    if i + 1 < args.len() {
-                        ssh_target_addr = args[i + 1].clone();
-                        i += 1;
-                    }
-                }
-                "--ovpn-target" => { // Ex: --ovpn-target 127.0.0.1:1194
-                    if i + 1 < args.len() {
-                        openvpn_target_addr = args[i + 1].clone();
-                        i += 1;
-                    }
-                }
-                "--http-target" => { // Ex: --http-target 127.0.0.1:8080
-                    if i + 1 < args.len() {
-                        http_target_addr = args[i + 1].clone();
-                        i += 1;
-                    }
-                }
-                "--peek-timeout" => {
-                    if i + 1 < args.len() {
-                        peek_timeout_secs = args[i + 1].parse().unwrap_or(peek_timeout_secs);
-                        i += 1;
-                    }
-                }
-                "--client-timeout" => {
-                    if i + 1 < args.len() {
-                        client_handling_timeout_secs = args[i+1].parse().unwrap_or(client_handling_timeout_secs);
-                        i += 1;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    http_target_addr: String,
 
-        Config {
-            port,
-            status,
-            ssh_target_addr,
-            openvpn_target_addr,
-            http_target_addr,
-            peek_timeout_secs,
-            client_handling_timeout_secs,
-        }
-    }
+    #[arg(long, default_value_t = 2)]
+    peek_timeout_secs: u64,
+
+    #[arg(long, default_value_t = 30)]
+    client_handling_timeout_secs: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Iniciando o proxy com configurações carregadas uma vez
-    let config = Arc::new(Config::from_args());
-    println!("Configurações carregadas: {:?}", config);
+    // Inicializa o logger tracing
+    tracing_subscriber::fmt::init();
+
+    // Carrega a configuração usando clap
+    let config = Arc::new(Config::parse());
+    info!("Configurações carregadas: {:?}", config);
 
     let listener = TcpListener::bind(format!("[::]:{}", config.port)).await?;
-    println!("Iniciando serviço na porta: {}", config.port);
-    start_http(listener, config).await; // Passa a config para start_http
+    info!("Serviço iniciado na porta: {}", config.port);
+    
+    start_proxy(listener, config).await;
     Ok(())
 }
 
-async fn start_http(listener: TcpListener, config: Arc<Config>) { // Aceita config
-    // Adiciona máximo de conexões simultâneas
+async fn start_proxy(listener: TcpListener, config: Arc<Config>) {
     let max_connections = Arc::new(Semaphore::new(1000));
 
     loop {
-        // Adquire uma permissão do semáforo. Fazemos o clone do Arc do semáforo.
+        // Usa `acquire_owned` para que o permit seja liberado quando a task terminar
         let permit = match max_connections.clone().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
-                // Isso aconteceria se o semáforo fosse fechado, o que não deve ocorrer neste loop.
-                println!("Erro ao adquirir permissão do semáforo. Encerrando.");
+                error!("Semaphore foi fechado, encerrando o loop.");
                 return;
             }
         };
+
         match listener.accept().await {
             Ok((client_stream, addr)) => {
-                // Clona o Arc<Config> para mover para a nova task
+                info!("Nova conexão de: {}", addr);
                 let config_clone = config.clone();
                 tokio::spawn(async move {
-                    let _permit = permit; // Mantém o permit ativo durante a vida da task
+                    // O permit é movido para dentro da task, garantindo que ele exista
+                    // durante todo o tempo de vida da conexão.
+                    let _permit = permit; 
                     if let Err(e) = handle_client(client_stream, config_clone).await {
-                        println!("Erro ao processar cliente {}: {}", addr, e);
+                        error!("Erro ao processar cliente {}: {}", addr, e);
                     }
+                    info!("Conexão com {} encerrada.", addr);
                 });
             }
             Err(e) => {
-                println!("Erro ao aceitar conexão: {}", e);
+                error!("Erro ao aceitar conexão: {}", e);
             }
         }
     }
 }
 
 async fn handle_client(mut client_stream: TcpStream, config: Arc<Config>) -> Result<(), Error> {
-    // Adiciona timeout para manipulação completa do cliente usando o valor da config
-    let result = timeout(Duration::from_secs(config.client_handling_timeout_secs), async {
+    let handle_timeout = Duration::from_secs(config.client_handling_timeout_secs);
+
+    timeout(handle_timeout, async {
+        // 1. Inspeciona os dados iniciais sem consumi-los
+        let peek_timeout = Duration::from_secs(config.peek_timeout_secs);
+        let mut peek_buffer = vec![0; 2048];
+        
+        let bytes_peeked = timeout(peek_timeout, client_stream.peek(&mut peek_buffer))
+            .await
+            .map_err(|_| Error::new(ErrorKind::TimedOut, "Timeout ao inspecionar o stream (peek)"))?
+            .map_err(|e| {
+                warn!("Erro de I/O ao inspecionar o stream: {}", e);
+                e
+            })?;
+
+        // 2. Realiza o handshake HTTP falso (injector)
         client_stream
             .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", config.status).as_bytes())
             .await?;
-
-        let mut buffer = vec![0; 2048]; // Buffer para a leitura inicial do cliente
-        client_stream.read(&mut buffer).await?; // Lê dados do cliente (ex: após um CONNECT)
-
+        
         client_stream
-            .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", config.status).as_bytes())
+            .write_all(format!("HTTP/1.1 200 Connection Established\r\n\r\n",).as_bytes())
             .await?;
 
-        // Determina o endereço do proxy de destino
-        let addr_proxy = match detect_protocol(&client_stream, config.clone()).await? {
-            "ssh" => config.ssh_target_addr.clone(),
-            "openvpn" => config.openvpn_target_addr.clone(),
-            "http" => config.http_target_addr.clone(), // Novo roteamento para HTTP
-            _ => config.ssh_target_addr.clone(), // Padrão para SSH
-        };
-        
-        println!("Redirecionando para: {}", addr_proxy);
+        // 3. Detecta o protocolo e determina o destino
+        let target_addr = detect_protocol(&peek_buffer[..bytes_peeked], &config);
+        info!("Redirecionando para: {}", target_addr);
 
-        // Conecta ao servidor de destino. O erro é propagado pelo '?'
-        let server_stream = TcpStream::connect(&addr_proxy).await?;
-        // Se a linha acima falhar, a função retorna Err(...) e não continua.
+        // 4. Conecta ao servidor de destino
+        let mut server_stream = TcpStream::connect(target_addr).await.map_err(|e| {
+            error!("Falha ao conectar ao destino {}: {}", target_addr, e);
+            e
+        })?;
 
-        let (client_read, client_write) = client_stream.into_split();
-        let (server_read, server_write) = server_stream.into_split();
+        // 5. Transfere os dados de forma bidirecional
+        let (mut client_read, mut client_write) = client_stream.split();
+        let (mut server_read, mut server_write) = server_stream.split();
 
-        // Uso de Arc<Mutex<...>> para as metades das streams
-        let client_read = Arc::new(Mutex::new(client_read));
-        let client_write = Arc::new(Mutex::new(client_write));
-        let server_read = Arc::new(Mutex::new(server_read));
-        let server_write = Arc::new(Mutex::new(server_write));
-
-        let client_to_server = transfer_data(client_read, server_write);
-        let server_to_client = transfer_data(server_read, client_write);
-
-        tokio::try_join!(client_to_server, server_to_client)?;
-        Ok(())
-    }).await;
-
-    // Tratamento do resultado do timeout
-    match result {
-        Ok(Ok(())) => Ok(()), // Operação interna completou com sucesso
-        Ok(Err(e)) => { // Operação interna falhou
-            // Não precisamos de um println! aqui, pois o erro será logado pela task em start_http
-            Err(e) 
+        match io::copy_bidirectional(&mut client_read, &mut server_read).await {
+            Ok((to_server, to_client)) => {
+                info!(
+                    "Transferência concluída. Bytes para o servidor: {}, Bytes para o cliente: {}",
+                    to_server, to_client
+                );
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Erro durante a transferência de dados: {}", e);
+                Err(e)
+            }
         }
-        Err(_elapsed_error) => { // Timeout ocorreu
-            println!("Timeout de {}s na manipulação do cliente", config.client_handling_timeout_secs);
-            Err(Error::new(ErrorKind::TimedOut, "Timeout na manipulação do cliente"))
-        }
-    }
+    }).await.map_err(|_| {
+        Error::new(ErrorKind::TimedOut, format!("Timeout de {}s ao manipular cliente", config.client_handling_timeout_secs))
+    })?
 }
 
-async fn transfer_data(
-    read_stream: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
-    write_stream: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-) -> Result<(), Error> {
-    let mut buffer = [0; 32768]; // Buffer de 8KB para transferência
-    loop {
-        let bytes_read = {
-            let mut read_guard = read_stream.lock().await;
-            read_guard.read(&mut buffer).await?
-        };
-
-        if bytes_read == 0 { // Conexão fechada pelo peer
-            break;
-        }
-
-        let mut write_guard = write_stream.lock().await;
-        write_guard.write_all(&buffer[..bytes_read]).await?;
-    }
-    Ok(())
-}
-
-// Função auxiliar para espiar o stream (peek)
-async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 32768]; // Buffer para peek
-    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
-    let data = &peek_buffer[..bytes_peeked];
-    Ok(String::from_utf8_lossy(data).to_string())
-}
 
 // Função para detectar o protocolo baseado nos dados iniciais
-async fn detect_protocol(stream: &TcpStream, config: Arc<Config>) -> Result<&'static str, Error> { // Aceita config
-    // Tenta espiar o stream com timeout configurado
-    let data = timeout(Duration::from_secs(config.peek_timeout_secs), peek_stream(stream))
-        .await
-        .map_err(|e| Error::new(ErrorKind::TimedOut, format!("Timeout no peek_stream: {}", e)))? // Mapeia erro de timeout do peek
-        .map_err(|e| Error::new(ErrorKind::Other, format!("Erro no peek_stream: {}", e)))?; // Mapeia erro interno do peek_stream
+fn detect_protocol<'a>(data: &[u8], config: &'a Config) -> &'a str {
+    let request_str = String::from_utf8_lossy(data);
 
-    if data.to_uppercase().contains("SSH") { // Torna a detecção de SSH case-insensitive
-        Ok("ssh")
-    } else if data.to_uppercase().contains("HTTP") { // Torna a detecção de HTTP case-insensitive
-        Ok("http")
-    } else if data.is_empty() { // Se nada for detectado (após o handshake inicial do proxy)
-        Ok("ssh") // Padrão para SSH se vazio (pode ser um cliente SSH que não enviou dados rapidamente)
-    } else {
-        // Se não for SSH, HTTP, nem vazio, assume OpenVPN ou outro protocolo configurado para essa rota
-        Ok("openvpn") 
+    // Detecção de SSH
+    if request_str.trim().starts_with("SSH-2.0") {
+        info!("Protocolo detectado: SSH");
+        return &config.ssh_target_addr;
+    } 
+    
+    // Detecção de métodos HTTP, incluindo o método "ACL"
+    else if request_str.starts_with("GET")
+        || request_str.starts_with("POST")
+        || request_str.starts_with("CONNECT")
+        || request_str.starts_with("PUT")
+        || request_str.starts_with("DELETE")
+        || request_str.starts_with("HEAD")
+        || request_str.starts_with("ACL") // >>> LINHA ADICIONADA <<<
+    {
+        info!("Protocolo detectado: HTTP");
+        return &config.http_target_addr;
+    } 
+    
+    // Se não for nenhum dos anteriores, usa o padrão
+    else {
+        info!("Protocolo não identificado, redirecionando para OpenVPN (padrão)");
+        &config.openvpn_target_addr
     }
 }
