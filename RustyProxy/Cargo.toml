@@ -4,3 +4,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1.37", features = ["full"] }
+tokio-websockets = { version = "0.7", features = ["client", "server"] } # Usaremos tanto o cliente quanto o servidor
+httparse = "1.8" # Para analisar os cabeçalhos HTTP de forma mais robusta
+http = "1.0" # Tipos de HTTP (Request, Response, HeaderValue etc.)
+bytes = "1.0" # Para manipulação de bytes
