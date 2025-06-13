@@ -6,8 +6,9 @@ use tokio::{time::Duration};
 use tokio::time::timeout;
 
 // --- Imports de tokio-tungstenite ---
-use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+use tokio_tungstenite::WebSocketStream; // WebSocketStream é o tipo principal
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig; // Para configurar o WebSocket
+// use tokio_tungstenite::tungstenite::Message; // Removido, pois o tipo Message é usado via StreamExt/SinkExt
 
 // --- Imports de HTTP e bytes ---
 use http::Uri;
@@ -15,11 +16,7 @@ use bytes::BytesMut;
 use httparse::{Request, EMPTY_HEADER}; // Corrigido: httparse re-importado
 
 // --- Imports para futures-util (traits) ---
-use futures_util::StreamExt; // Para o método .next()
-use futures_util::SinkExt;   // Para o método .send()
-
-// Note: WebSocketStream.split() é um método direto na tokio-tungstenite v0.21,
-// ou ele é visível por causa de StreamExt/SinkExt estarem no escopo.
+use futures_util::{StreamExt, SinkExt}; // Para os métodos .next() e .send()
 
 
 #[tokio::main]
@@ -62,9 +59,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let parse_status = req.parse(&buf)
         .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, format!("Erro de parsing HTTP: {}", e)))?;
 
-    let is_websocket_upgrade = if let httparse::Status::Complete(offset) = parse_status {
-        // Ignorar o offset por enquanto, ele não está sendo usado
-        let _ = offset; 
+    let is_websocket_upgrade = if let httparse::Status::Complete(_offset) = parse_status { // _offset para ignorar warning
         let mut upgrade_found = false;
         let mut connection_upgrade_found = false;
 
@@ -83,8 +78,9 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     if is_websocket_upgrade {
         println!("Detectado Handshake WebSocket!");
-        // O `initial_data_buf` deve ser passado como `Bytes` para `accept_async_with_config`
-        handle_websocket_proxy(client_stream, buf.freeze()).await?;
+        // Não é necessário passar 'buf.freeze()' aqui, a função `accept_async_with_config`
+        // lerá o que já está no stream TCP.
+        handle_websocket_proxy(client_stream).await?; // Não passa initial_data aqui
     } else {
         let status = get_status();
         client_stream
@@ -141,23 +137,22 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
 async fn handle_websocket_proxy(
     client_tcp_stream: TcpStream,
-    initial_data: bytes::Bytes, // Agora recebe Bytes (o resultado de buf.freeze())
+    // initial_data: bytes::Bytes, // Removido, pois não é mais passado para a função
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // Correção: accept_async_with_config toma o stream, a config e o buffer.
-    // Usamos `initial_data` (Bytes) diretamente.
-    // E `WebSocketConfig` usa campos, não métodos.
+    // Correção final para accept_async_with_config:
+    // Apenas dois argumentos: o stream e a configuração opcional.
+    // A função lê o que já está no buffer do stream TCP.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
-            max_send_queue: None, // Usa campos públicos
+            max_send_queue: None, // Usa campos públicos. Warning de deprecated pode persistir se a crate marca o campo assim.
             max_message_size: None,
             max_frame_size: None,
             // Outros campos da config, se necessário
             ..Default::default() // Para preencher o resto com valores padrão
         }),
-        Some(initial_data), // Passa o Bytes como ReadBuf
     ).await {
         Ok(ws) => ws,
         Err(e) => {
