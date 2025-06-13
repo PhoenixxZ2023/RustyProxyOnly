@@ -3,9 +3,8 @@ name = "RustyProxy"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.37", features = ["full"] }
-tokio-websockets = { version = "0.11", features = ["client", "server", "ring", "getrandom"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls", "accept", "connect"] } 
 httparse = "1.8"
 http = "1.0"
 bytes = "1.0"
-futures-util = "0.3" # Sem nenhuma feature explícita aqui.
