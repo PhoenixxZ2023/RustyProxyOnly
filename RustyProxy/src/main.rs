@@ -135,7 +135,7 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // CORREÇÃO FINAL: A ordem dos campos em `WebSocketConfig` está correta agora.
+    // CORREÇÃO FINAL FINAL FINAL: A ordem dos campos em `WebSocketConfig` está correta AGORA.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
