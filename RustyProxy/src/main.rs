@@ -42,7 +42,7 @@ async fn start_http(listener: TcpListener) {
 }
 
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    let mut buf = BytesMut::with_capacity(4096);
+    let mut buf = BytesMut::with_capacity(32768);
 
     let bytes_read = client_stream.read_buf(&mut buf).await?;
     if bytes_read == 0 {
@@ -160,7 +160,7 @@ async fn handle_websocket_proxy(
     println!("Handshake WebSocket com cliente concluído.");
 
     // Conectar-se ao servidor WebSocket de destino.
-    let ws_target_addr = "ws://127.0.0.1:8081"; // Ajuste para o seu servidor WebSocket real
+    let ws_target_addr = "ws://127.0.0.1:8080"; // Ajuste para o seu servidor WebSocket real
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
     let (ws_server_stream, _response) = match tokio_tungstenite::connect_async(uri).await {
