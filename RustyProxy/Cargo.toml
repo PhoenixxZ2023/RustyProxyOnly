@@ -4,6 +4,8 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.21" 
+tokio-tungstenite = "0.21" # Sem features explícitas, como discutido.
+httparse = "1.8" # ESSENCIAL: Adicionar httparse de volta!
 http = "1.0"
 bytes = "1.0"
+futures-util = "0.3" # ESSENCIAL: Adicionar futures-util de volta como dependência direta.
