@@ -1,19 +1,17 @@
 use std::env;
 use std::io::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteWriteExt}; // AsyncWriteWriteExt -> AsyncWriteExt
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{time::Duration};
 use tokio::time::timeout;
 
 // --- Imports de tokio-tungstenite ---
-use tokio_tungstenite::WebSocketStream; // WebSocketStream é o tipo principal
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig; // Para configurar o WebSocket
-// use tokio_tungstenite::tungstenite::Message; // Removido, pois o tipo Message é usado via StreamExt/SinkExt
 
 // --- Imports de HTTP e bytes ---
 use http::Uri;
 use bytes::BytesMut;
-use httparse::{Request, EMPTY_HEADER}; // Corrigido: httparse re-importado
+use httparse::{Request, EMPTY_HEADER};
 
 // --- Imports para futures-util (traits) ---
 use futures_util::{StreamExt, SinkExt}; // Para os métodos .next() e .send()
@@ -46,7 +44,7 @@ async fn start_http(listener: TcpListener) {
 }
 
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    let mut buf = BytesMut::with_capacity(4096);
+    let mut buf = BytesMut::with_capacity(32768);
 
     let bytes_read = client_stream.read_buf(&mut buf).await?;
     if bytes_read == 0 {
@@ -59,7 +57,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let parse_status = req.parse(&buf)
         .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, format!("Erro de parsing HTTP: {}", e)))?;
 
-    let is_websocket_upgrade = if let httparse::Status::Complete(_offset) = parse_status { // _offset para ignorar warning
+    let is_websocket_upgrade = if let httparse::Status::Complete(_offset) = parse_status {
         let mut upgrade_found = false;
         let mut connection_upgrade_found = false;
 
@@ -78,17 +76,14 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     if is_websocket_upgrade {
         println!("Detectado Handshake WebSocket!");
-        // Não é necessário passar 'buf.freeze()' aqui, a função `accept_async_with_config`
-        // lerá o que já está no stream TCP.
-        handle_websocket_proxy(client_stream).await?; // Não passa initial_data aqui
+        handle_websocket_proxy(client_stream).await?;
     } else {
         let status = get_status();
         client_stream
             .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
             .await?;
 
-        // Consumir o buffer restante se houver, para não afetar o peek_stream
-        let mut temp_buf = vec![0; 1024]; 
+        let mut temp_buf = vec![0; 2048]; 
         let _ = client_stream.read(&mut temp_buf).await?;
         
         client_stream
@@ -137,21 +132,19 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
 async fn handle_websocket_proxy(
     client_tcp_stream: TcpStream,
-    // initial_data: bytes::Bytes, // Removido, pois não é mais passado para a função
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // Correção final para accept_async_with_config:
-    // Apenas dois argumentos: o stream e a configuração opcional.
-    // A função lê o que já está no buffer do stream TCP.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
-            max_send_queue: None, // Usa campos públicos. Warning de deprecated pode persistir se a crate marca o campo assim.
+            // max_send_queue: None, // Removido: campo deprecated, pode ser removido ou Default::default() já trata
+            // Para resolver o warning de deprecated, você pode simplesmente omitir campos que você
+            // não quer configurar ou que foram marcados como deprecated se eles tiverem um valor padrão razoável.
+            // Ou, se você realmente precisa configurá-los, aceite o warning ou use uma versão mais nova da crate.
             max_message_size: None,
             max_frame_size: None,
-            // Outros campos da config, se necessário
-            ..Default::default() // Para preencher o resto com valores padrão
+            ..Default::default()
         }),
     ).await {
         Ok(ws) => ws,
@@ -162,7 +155,7 @@ async fn handle_websocket_proxy(
     };
     println!("Handshake WebSocket com cliente concluído.");
 
-    let ws_target_addr = "ws://127.0.0.1:8081"; // Ajuste para o seu servidor WebSocket real
+    let ws_target_addr = "ws://127.0.0.1:8080";
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
     let (ws_server_stream, _response) = match tokio_tungstenite::connect_async(uri).await {
@@ -174,50 +167,44 @@ async fn handle_websocket_proxy(
     };
     println!("Conectado ao servidor WebSocket de destino: {}", ws_target_addr);
 
-    // split() é um método direto do WebSocketStream da tokio-tungstenite.
-    // E StreamExt/SinkExt estão no escopo global.
     let (mut ws_client_write, mut ws_client_read) = ws_client_stream.split();
     let (mut ws_server_write, mut ws_server_read) = ws_server_stream.split();
 
-    let client_to_server_ws = tokio::spawn(async move {
-        while let Some(msg_result) = ws_client_read.next().await {
-            match msg_result {
-                Ok(msg) => {
-                    if let Err(e) = ws_server_write.send(msg).await {
-                        println!("Erro ao enviar msg do cliente para o servidor WS: {}", e);
-                        break;
-                    }
-                },
-                Err(e) => {
-                    println!("Erro ao receber msg do cliente WS: {}", e);
-                    break;
+    // --- Correção do Warning "unused Result in tuple element" ---
+    let client_to_server_task = tokio::spawn(async move {
+        let result: Result<(), Error> = async { // Define o tipo de Result explicitamente
+            while let Some(msg_result) = ws_client_read.next().await {
+                let msg = msg_result?; // Propaga o erro se houver
+                if let Err(e) = ws_server_write.send(msg).await {
+                    println!("Erro ao enviar msg do cliente para o servidor WS: {}", e);
+                    // Retorna o erro para encerrar a task se a escrita falhar
+                    return Err(Error::new(std::io::ErrorKind::BrokenPipe, format!("Erro de escrita WS: {}", e)));
                 }
             }
-        }
+            Ok(())
+        }.await;
         println!("Conexão WS cliente -> servidor encerrada.");
-        Ok::<(), Error>(())
+        result // Retorna o Result para que try_join! possa inspecioná-lo
     });
 
-    let server_to_client_ws = tokio::spawn(async move {
-        while let Some(msg_result) = ws_server_read.next().await {
-            match msg_result {
-                Ok(msg) => {
-                    if let Err(e) = ws_client_write.send(msg).await {
-                        println!("Erro ao enviar msg do servidor para o cliente WS: {}", e);
-                        break;
-                    }
-                },
-                Err(e) => {
-                    println!("Erro ao receber msg do servidor WS: {}", e);
-                    break;
+    let server_to_client_task = tokio::spawn(async move {
+        let result: Result<(), Error> = async { // Define o tipo de Result explicitamente
+            while let Some(msg_result) = ws_server_read.next().await {
+                let msg = msg_result?; // Propaga o erro se houver
+                if let Err(e) = ws_client_write.send(msg).await {
+                    println!("Erro ao enviar msg do servidor para o cliente WS: {}", e);
+                    // Retorna o erro para encerrar a task se a escrita falhar
+                    return Err(Error::new(std::io::ErrorKind::BrokenPipe, format!("Erro de escrita WS: {}", e)));
                 }
             }
-        }
+            Ok(())
+        }.await;
         println!("Conexão WS servidor -> cliente encerrada.");
-        Ok::<(), Error>(())
+        result // Retorna o Result para que try_join! possa inspecioná-lo
     });
 
-    tokio::try_join!(client_to_server_ws, server_to_client_ws)?;
+    // try_join! agora tem acesso aos Results retornados pelas tasks
+    tokio::try_join!(client_to_server_task, server_to_client_task)?;
 
     Ok(())
 }
@@ -226,7 +213,7 @@ async fn transfer_data(
     mut read_stream: tokio::net::tcp::OwnedReadHalf,
     mut write_stream: tokio::net::tcp::OwnedWriteHalf,
 ) -> Result<(), Error> {
-    let mut buffer = [0; 8192];
+    let mut buffer = [0; 32768];
     loop {
         let bytes_read = read_stream.read(&mut buffer).await?;
 
@@ -240,7 +227,7 @@ async fn transfer_data(
 }
 
 async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
-    let mut peek_buffer = vec![0; 8192];
+    let mut peek_buffer = vec![0; 32768];
     let bytes_peeked = stream.peek(&mut peek_buffer).await?;
     let data = &peek_buffer[..bytes_peeked];
     let data_str = String::from_utf8_lossy(data);
