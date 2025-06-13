@@ -1,6 +1,5 @@
 use std::env;
 use std::io::Error;
-// CORREÇÃO 1: Digitação errada e garantir que AsyncWriteExt seja importado
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{time::Duration};
@@ -15,7 +14,7 @@ use bytes::BytesMut;
 use httparse::{Request, EMPTY_HEADER};
 
 // --- Imports para futures-util (traits) ---
-use futures_util::{StreamExt, SinkExt}; // Para os métodos .next() e .send()
+use futures_util::{StreamExt, SinkExt};
 
 
 #[tokio::main]
@@ -136,12 +135,15 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
+    // CORREÇÃO FINAL: Inicialização de WebSocketConfig para struct non_exhaustive
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
+            // Começa com Default::default()
+            ..Default::default()
+            // Então, sobrescreve os campos desejados
             max_message_size: None,
             max_frame_size: None,
-            ..Default::default()
         }),
     ).await {
         Ok(ws) => ws,
@@ -152,7 +154,7 @@ async fn handle_websocket_proxy(
     };
     println!("Handshake WebSocket com cliente concluído.");
 
-    let ws_target_addr = "ws://127.0.0.1:8081";
+    let ws_target_addr = "ws://127.0.0.1:8080";
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
     let (ws_server_stream, _response) = match tokio_tungstenite::connect_async(uri).await {
@@ -170,7 +172,6 @@ async fn handle_websocket_proxy(
     let client_to_server_task = tokio::spawn(async move {
         let result: Result<(), Error> = async {
             while let Some(msg_result) = ws_client_read.next().await {
-                // CORREÇÃO 3: Converter o erro de tungstenite::Error para std::io::Error
                 let msg = msg_result.map_err(|e| Error::new(std::io::ErrorKind::Other, format!("Erro de leitura WS: {}", e)))?;
                 if let Err(e) = ws_server_write.send(msg).await {
                     println!("Erro ao enviar msg do cliente para o servidor WS: {}", e);
@@ -186,7 +187,6 @@ async fn handle_websocket_proxy(
     let server_to_client_task = tokio::spawn(async move {
         let result: Result<(), Error> = async {
             while let Some(msg_result) = ws_server_read.next().await {
-                // CORREÇÃO 3: Converter o erro de tungstenite::Error para std::io::Error
                 let msg = msg_result.map_err(|e| Error::new(std::io::ErrorKind::Other, format!("Erro de leitura WS: {}", e)))?;
                 if let Err(e) = ws_client_write.send(msg).await {
                     println!("Erro ao enviar msg do servidor para o cliente WS: {}", e);
@@ -215,7 +215,6 @@ async fn transfer_data(
         if bytes_read == 0 {
             break;
         }
-        // CORREÇÃO 2: write_all agora visível por causa do AsyncWriteExt
         write_stream.write_all(&buffer[..bytes_read]).await?;
     }
     Ok(())
