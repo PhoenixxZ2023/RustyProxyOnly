@@ -14,7 +14,7 @@ use bytes::BytesMut;
 use httparse::{Request, EMPTY_HEADER};
 
 // --- Imports para futures-util (traits) ---
-use futures_util::{StreamExt, SinkExt};
+use futures_util::{StreamExt, SinkExt}; // Para os métodos .next() e .send()
 
 
 #[tokio::main]
@@ -135,15 +135,14 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // CORREÇÃO FINAL: Inicialização de WebSocketConfig para struct non_exhaustive
+    // CORREÇÃO FINAL FINAL: Ordem correta dos campos na inicialização da struct WebSocketConfig
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
-            // Começa com Default::default()
-            ..Default::default()
-            // Então, sobrescreve os campos desejados
             max_message_size: None,
             max_frame_size: None,
+            // ..Default::default() DEVE ser o último campo se outros campos forem inicializados
+            ..Default::default()
         }),
     ).await {
         Ok(ws) => ws,
@@ -154,7 +153,7 @@ async fn handle_websocket_proxy(
     };
     println!("Handshake WebSocket com cliente concluído.");
 
-    let ws_target_addr = "ws://127.0.0.1:8080";
+    let ws_target_addr = "ws://127.0.0.1:8081";
     let uri: Uri = ws_target_addr.parse().expect("URI inválida");
 
     let (ws_server_stream, _response) = match tokio_tungstenite::connect_async(uri).await {
