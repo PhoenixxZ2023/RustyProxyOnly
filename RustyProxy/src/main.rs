@@ -1,6 +1,6 @@
 use std::env;
 use std::io::Error;
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Correção: AsyncWriteExt importado corretamente
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{time::Duration};
 use tokio::time::timeout;
@@ -141,13 +141,13 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // Aceita a conexão WebSocket do cliente. `tokio-tungstenite` usa o buffer já lido.
+    // CORREÇÃO: A ordem dos campos em `WebSocketConfig` está correta AGORA.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(WebSocketConfig {
-            max_message_size: None, // Configurações opcionais da WebSocket, use None para valores padrão
-            max_frame_size: None,
-            ..Default::default()    // Importante: `..Default::default()` DEVE ser o último campo
+            max_message_size: None, // Campo 1
+            max_frame_size: None,   // Campo 2
+            ..Default::default()    // ESSENCIAL: Isso DEVE ser o último campo.
         }),
     ).await {
         Ok(ws) => ws,
