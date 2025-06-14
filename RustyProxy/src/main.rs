@@ -6,14 +6,13 @@ use tokio::{time::Duration};
 use tokio::time::timeout;
 
 // --- Imports de tokio-tungstenite ---
-use tokio_tungstenite::WebSocketStream; // WebSocketStream é o tipo principal
+// WebSocketStream foi removido, pois a inferência de tipo é suficiente.
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig; // Para configurar o WebSocket
-// use tokio_tungstenite::tungstenite::Message; // Removido, pois o tipo Message é usado via StreamExt/SinkExt
 
 // --- Imports de HTTP e bytes ---
 use http::Uri;
 use bytes::BytesMut;
-use httparse::{Request, EMPTY_HEADER}; // Corrigido: httparse re-importado
+use httparse::{Request, EMPTY_HEADER};
 
 // --- Imports para futures-util (traits) ---
 use futures_util::{StreamExt, SinkExt}; // Para os métodos .next() e .send()
@@ -78,19 +77,12 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     if is_websocket_upgrade {
         println!("Detectado Handshake WebSocket!");
-        // Não é necessário passar 'buf.freeze()' aqui, a função `accept_async_with_config`
-        // lerá o que já está no stream TCP.
-        handle_websocket_proxy(client_stream).await?; // Não passa initial_data aqui
+        handle_websocket_proxy(client_stream).await?;
     } else {
         let status = get_status();
-        client_stream
-            .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
-            .await?;
-
-        // Consumir o buffer restante se houver, para não afetar o peek_stream
-        let mut temp_buf = vec![0; 1024]; 
-        let _ = client_stream.read(&mut temp_buf).await?;
         
+        // CORREÇÃO 2: A linha que enviava '101' foi REMOVIDA.
+        // Apenas a resposta '200 OK' é enviada.
         client_stream
             .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
             .await?;
@@ -137,22 +129,13 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
 async fn handle_websocket_proxy(
     client_tcp_stream: TcpStream,
-    // initial_data: bytes::Bytes, // Removido, pois não é mais passado para a função
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // Correção final para accept_async_with_config:
-    // Apenas dois argumentos: o stream e a configuração opcional.
-    // A função lê o que já está no buffer do stream TCP.
+    // CORREÇÃO 1: Usar WebSocketConfig::default() para criar a configuração.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
-        Some(WebSocketConfig {
-            max_send_queue: None, // Usa campos públicos. Warning de deprecated pode persistir se a crate marca o campo assim.
-            max_message_size: None,
-            max_frame_size: None,
-            // Outros campos da config, se necessário
-            ..Default::default() // Para preencher o resto com valores padrão
-        }),
+        Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()),
     ).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -174,8 +157,6 @@ async fn handle_websocket_proxy(
     };
     println!("Conectado ao servidor WebSocket de destino: {}", ws_target_addr);
 
-    // split() é um método direto do WebSocketStream da tokio-tungstenite.
-    // E StreamExt/SinkExt estão no escopo global.
     let (mut ws_client_write, mut ws_client_read) = ws_client_stream.split();
     let (mut ws_server_write, mut ws_server_read) = ws_server_stream.split();
 
