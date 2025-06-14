@@ -86,7 +86,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
                 handle_websocket_proxy(client_stream).await?; // A lib Tungstenite relê o buffer
             } else {
                 println!("Detectada requisição HTTP padrão. Encaminhando...");
-                let http_addr = "127.0.0.1:8080"; // Porta do seu Nginx/Apache
+                let http_addr = "127.0.0.1:80"; // Porta do seu Nginx/Apache
                 proxy_raw_traffic(client_stream, buf, http_addr).await?;
             }
         } else {
@@ -121,7 +121,7 @@ async fn proxy_raw_traffic(mut client_stream: TcpStream, initial_buffer: BytesMu
 
 // Função de proxy WebSocket (simplificada, pois o buffer inicial é lido pela lib)
 async fn handle_websocket_proxy(client_tcp_stream: TcpStream) -> Result<(), Error> {
-    let ws_target_addr = "ws://127.0.0.1:8081";
+    let ws_target_addr = "ws://127.0.0.1:8080";
     let ws_client_stream = match tokio_tungstenite::accept_async(client_tcp_stream).await {
         Ok(ws) => ws,
         Err(e) => {
