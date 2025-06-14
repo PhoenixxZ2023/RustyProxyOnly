@@ -1,6 +1,6 @@
 use std::io::{self, Error};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional}; // <--- IMPORTAÇÃO ADICIONADA AQUI (indiretamente)
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Duration};
 use clap::Parser;
@@ -67,13 +67,12 @@ async fn handle_client(mut client_stream: TcpStream, args: Arc<Args>) -> io::Res
         .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", args.status).as_bytes())
         .await?;
 
-    // --- LÓGICA DE DETECÇÃO RESTAURADA PARA O ORIGINAL ---
+    // Lógica de detecção de protocolo
     let mut peek_buffer = [0; 1024];
     let proxy_addr = match timeout(Duration::from_secs(1), client_stream.peek(&mut peek_buffer)).await {
-        // Sucesso ao espiar os dados (Ok(Ok(...)))
+        // Sucesso ao espiar os dados
         Ok(Ok(bytes_peeked)) => {
             let data_str = String::from_utf8_lossy(&peek_buffer[..bytes_peeked]);
-            // Aplicando a lógica original do usuário
             if data_str.contains("SSH") || data_str.is_empty() {
                 info!("Detectado 'SSH' ou payload vazio. Redirecionando para {}", &args.ssh_addr);
                 &args.ssh_addr
@@ -93,7 +92,8 @@ async fn handle_client(mut client_stream: TcpStream, args: Arc<Args>) -> io::Res
     let mut server_stream = TcpStream::connect(proxy_addr).await?;
     info!("Conexão estabelecida. Iniciando proxy bidirecional.");
 
-    let (bytes_sent, bytes_received) = io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
+    // --- CHAMADA DA FUNÇÃO CORRIGIDA ---
+    let (bytes_sent, bytes_received) = copy_bidirectional(&mut client_stream, &mut server_stream).await?;
 
     info!("Conexão fechada. Bytes enviados: {}, Bytes recebidos: {}", bytes_sent, bytes_received);
 
