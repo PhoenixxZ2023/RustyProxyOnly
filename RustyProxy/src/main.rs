@@ -1,161 +1,141 @@
-use std::io::{self, Error};
-use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use std::env;
+use std::io::Error;
+// Removidos os imports de Arc e Mutex, pois não são mais necessários para transfer_data
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use clap::Parser;
-use tracing::{error, info, instrument, warn};
-use tokio_tungstenite;
-use futures_util::{StreamExt, SinkExt};
-use httparse::Status;
-
-// --- Estrutura de Configuração (removido --ws-addr, não é mais necessário) ---
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "Um proxy TCP/WebSocket dinâmico para redirecionar tráfego.")]
-struct Args {
-    #[arg(long, short, default_value_t = 80)]
-    port: u16,
-    #[arg(long, default_value = "@RustyManager")]
-    status: String,
-    #[arg(long, default_value = "127.0.0.1:22")]
-    ssh_addr: String,
-    #[arg(long, default_value = "127.0.0.1:1194")]
-    default_addr: String,
-}
+use tokio::{time::Duration};
+use tokio::time::timeout;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt::init();
-    let args = Arc::new(Args::parse());
-    let listener = TcpListener::bind(format!("[::]:{}", args.port)).await?;
-    info!("Proxy escutando em: {}", listener.local_addr()?);
+    // Iniciando o proxy
+    let port = get_port();
+    let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
+    println!("Iniciando serviço na porta: {}", port);
+    start_http(listener).await;
+    Ok(())
+}
 
+async fn start_http(listener: TcpListener) {
     loop {
-        if let Ok((client_stream, addr)) = listener.accept().await {
-            info!("Nova conexão de: {}", addr);
-            let args_clone = args.clone();
-            tokio::spawn(async move {
-                if let Err(e) = handle_connection_routing(client_stream, args_clone).await {
-                    error!("Erro ao processar cliente {}: {}", addr, e);
-                }
-            });
+        match listener.accept().await {
+            Ok((client_stream, addr)) => {
+                tokio::spawn(async move {
+                    if let Err(e) = handle_client(client_stream).await {
+                        println!("Erro ao processar cliente {}: {}", addr, e);
+                    }
+                });
+            }
+            Err(e) => {
+                println!("Erro ao aceitar conexão: {}", e);
+            }
         }
     }
 }
 
-// --- Roteador Principal ---
-#[instrument(skip_all, fields(client_addr = %stream.peer_addr().ok().map_or_else(String::new, |a| a.to_string())))]
-async fn handle_connection_routing(stream: TcpStream, args: Arc<Args>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut buffer = [0; 2048];
-    let bytes_read = stream.peek(&mut buffer).await?;
+async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
+    let status = get_status();
+    client_stream
+        .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
-    if bytes_read == 0 {
-        warn!("Cliente conectou e desconectou sem enviar dados.");
-        return Ok(());
-    }
+    let mut buffer = vec![0; 2048];
+    // O read aqui parece ser para consumir algo do cliente após o 101, mas
+    // não é usado para nada significativo depois. Considere se é realmente necessário.
+    client_stream.read(&mut buffer).await?;
+    client_stream
+        .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
+        .await?;
 
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Request::new(&mut headers);
-    
-    if let Ok(Status::Complete(_)) = req.parse(&buffer[..bytes_read]) {
-        if is_websocket_request(&req) {
-            info!("Requisição WebSocket detectada.");
-            // Passamos a requisição 'req' para o handler poder ler o Host
-            return handle_websocket_proxy(stream, &req).await;
+    // --- Melhoria 2: Tratamento de Erros Mais Robusto ---
+    let peek_result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await;
+
+    let data_to_check = match peek_result {
+        Ok(Ok(data)) => data, // Sucesso em peek_stream dentro do timeout
+        Ok(Err(e)) => {
+            println!("Erro ao espiar o stream: {}", e);
+            String::new() // Continua, mas com uma string vazia
+        },
+        Err(_) => {
+            // Timeout ocorreu
+            println!("Tempo limite excedido ao espiar o stream.");
+            String::new() // Continua, mas com uma string vazia
         }
-    }
-    
-    info!("Conexão não é WebSocket. Tratando como TCP puro.");
-    handle_tcp_proxy(stream, &buffer[..bytes_read], args).await?;
-    Ok(())
-}
+    };
 
-// --- Lógica TCP (sem alterações) ---
-async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], args: Arc<Args>) -> io::Result<()> {
-    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", args.status).as_bytes()).await?;
+    let mut addr_proxy = "0.0.0.0:22"; // Valor padrão para SSH
 
-    let data_str = String::from_utf8_lossy(initial_data);
-    let proxy_addr = if data_str.contains("SSH") {
-        info!("Detectado 'SSH'. Redirecionando para {}", &args.ssh_addr);
-        &args.ssh_addr
+    if data_to_check.contains("SSH") || data_to_check.is_empty() {
+        addr_proxy = "0.0.0.0:22";
     } else {
-        info!("Payload não contém 'SSH'. Redirecionando para {}", &args.default_addr);
-        &args.default_addr
+        addr_proxy = "0.0.0.0:1194";
+    }
+
+    let server_connect = TcpStream::connect(addr_proxy).await;
+    let server_stream = match server_connect {
+        Ok(s) => s,
+        Err(e) => {
+            println!("Erro ao iniciar conexão para o proxy {}: {}", addr_proxy, e);
+            return Ok(()); // Retorna Ok(()) para a tarefa não falhar, mas o erro é logado.
+        }
     };
 
-    let mut server_stream = TcpStream::connect(proxy_addr).await?;
-    info!("Conexão TCP estabelecida com {}. Iniciando proxy.", proxy_addr);
-    tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
+    let (client_read, client_write) = client_stream.into_split();
+    let (server_read, server_write) = server_stream.into_split();
+
+    // --- Melhoria 1: Metades do Stream Passadas Diretamente (sem Arc<Mutex>) ---
+    let client_to_server = transfer_data(client_read, server_write);
+    let server_to_client = transfer_data(server_read, client_write);
+
+    tokio::try_join!(client_to_server, server_to_client)?;
+
     Ok(())
 }
 
-// --- LÓGICA WEBSOCKET DINÂMICA ATUALIZADA ---
-async fn handle_websocket_proxy<'a>(
-    client_stream: TcpStream,
-    req: &httparse::Request<'a, '_>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Encontrar o cabeçalho Host
-    let host_header = req.headers.iter().find(|h| h.name.eq_ignore_ascii_case("Host"));
+// --- Melhoria 1: Assinatura da Função transfer_data Alterada ---
+async fn transfer_data(
+    mut read_stream: tokio::net::tcp::OwnedReadHalf, // Recebe por valor
+    mut write_stream: tokio::net::tcp::OwnedWriteHalf, // Recebe por valor
+) -> Result<(), Error> {
+    let mut buffer = [0; 32768];
+    loop {
+        let bytes_read = read_stream.read(&mut buffer).await?;
 
-    let Some(host_header) = host_header else {
-        warn!("Requisição WebSocket sem cabeçalho Host. Descartando.");
-        return Err("Cabeçalho Host ausente na requisição WebSocket".into());
-    };
-
-    let host = std::str::from_utf8(host_header.value)?;
-    // Adiciona a porta 80 se não houver uma especificada no Host
-    let destination_addr = if host.contains(':') {
-        host.to_string()
-    } else {
-        format!("{}:80", host)
-    };
-
-    info!("Iniciando proxy WebSocket para o destino dinâmico: {}", destination_addr);
-
-    // 2. Conectar-se ao destino extraído do Host
-    let (server_ws_stream, _) = tokio_tungstenite::connect_async(&destination_addr).await?;
-    info!("Conexão WebSocket com o servidor de destino estabelecida.");
-
-    // 3. O resto da lógica continua igual
-    let client_ws_stream = tokio_tungstenite::accept_async(client_stream).await?;
-    info!("Handshake com o cliente concluído. A conexão foi promovida para WebSocket.");
-
-    let (mut client_write, mut client_read) = client_ws_stream.split();
-    let (mut server_write, mut server_read) = server_ws_stream.split();
-
-    let client_to_server = async {
-        while let Some(msg) = client_read.next().await {
-            if let Ok(msg) = msg {
-                if server_write.send(msg).await.is_err() { break; }
-            } else { break; }
+        if bytes_read == 0 {
+            break; // Conexão fechada
         }
-    };
 
-    let server_to_client = async {
-        while let Some(msg) = server_read.next().await {
-            if let Ok(msg) = msg {
-                if client_write.send(msg).await.is_err() { break; }
-            } else { break; }
-        }
-    };
-    
-    futures_util::future::join(client_to_server, server_to_client).await;
-    info!("Conexão WebSocket encerrada para {}", destination_addr);
+        write_stream.write_all(&buffer[..bytes_read]).await?;
+    }
+
     Ok(())
 }
 
-// --- Função Auxiliar (sem alterações) ---
-fn is_websocket_request(req: &httparse::Request) -> bool {
-    let mut connection_upgrade = false;
-    let mut is_upgrade_ws = false;
-    for header in req.headers.iter() {
-        let key = header.name.to_lowercase();
-        let value = String::from_utf8_lossy(header.value).to_lowercase();
-        if key == "connection" && value.contains("upgrade") {
-            connection_upgrade = true;
-        }
-        if key == "upgrade" && value == "websocket" {
-            is_upgrade_ws = true;
+async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 32768];
+    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
+    let data = &peek_buffer[..bytes_peeked];
+    let data_str = String::from_utf8_lossy(data);
+    Ok(data_str.to_string())
+}
+
+// --- Melhoria 3: Funções get_port e get_status Refatoradas ---
+fn get_arg_value(arg_name: &str, default_value: &str) -> String {
+    let args: Vec<String> = env::args().collect();
+    for i in 1..args.len() {
+        if args[i] == arg_name {
+            if i + 1 < args.len() {
+                return args[i + 1].clone();
+            }
         }
     }
-    connection_upgrade && is_upgrade_ws
+    default_value.to_string()
+}
+
+fn get_port() -> u16 {
+    get_arg_value("--port", "80").parse().unwrap_or(80)
+}
+
+fn get_status() -> String {
+    get_arg_value("--status", "@RustyManager")
 }
