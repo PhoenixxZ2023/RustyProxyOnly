@@ -2,136 +2,152 @@ use std::env;
 use std::io::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{timeout, Duration};
+
+// Dependências necessárias para o novo suporte a WebSocket e HTTP parsing
 use bytes::BytesMut;
-use httparse::{Request, EMPTY_HEADER};
-use futures_util::{StreamExt, SinkExt};
+use futures_util::{SinkExt, StreamExt};
 use http::Uri;
+use httparse::{Request, EMPTY_HEADER};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
-    println!("Iniciando RustyProxy na porta: {}", port);
-    start_http(listener).await;
+    println!("Iniciando proxy (SSH/OpenVPN + WebSocket) na porta: {}", port);
+    start_proxy(listener).await;
     Ok(())
 }
 
-async fn start_http(listener: TcpListener) {
+async fn start_proxy(listener: TcpListener) {
     loop {
-        match listener.accept().await {
-            Ok((client_stream, addr)) => {
-                tokio::spawn(async move {
-                    if let Err(e) = handle_client(client_stream).await {
-                        if !e.to_string().contains("Connection reset by peer") && !e.to_string().contains("unexpected eof") {
-                            println!("Erro ao processar cliente {}: {}", addr, e);
-                        }
-                    }
-                });
-            }
-            Err(e) => {
-                println!("Erro ao aceitar conexão: {}", e);
-            }
-        }
-    }
-}
-
-async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    let mut buf = BytesMut::with_capacity(8192);
-
-    let bytes_read = client_stream.read_buf(&mut buf).await?;
-    if bytes_read == 0 {
-        return Ok(());
-    }
-
-    let is_openvpn = buf.len() > 2 && buf[2] == 0x38;
-
-    if is_openvpn {
-        println!("Detectado tráfego OpenVPN. Encaminhando...");
-        let openvpn_addr = "127.0.0.1:1194";
-        proxy_raw_traffic(client_stream, buf, openvpn_addr).await?;
-    } else {
-        let mut headers = [EMPTY_HEADER; 32];
-        let mut req = Request::new(&mut headers);
-        
-        if req.parse(&buf).is_ok() {
-            let mut is_ws = false;
-            for h in req.headers.iter() {
-                if h.name.eq_ignore_ascii_case("Upgrade") && String::from_utf8_lossy(h.value).eq_ignore_ascii_case("websocket") {
-                    if let Some(conn_header) = req.headers.iter().find(|h2| h2.name.eq_ignore_ascii_case("Connection")) {
-                        if String::from_utf8_lossy(conn_header.value).eq_ignore_ascii_case("Upgrade") {
-                            is_ws = true;
-                            break;
-                        }
+        if let Ok((client_stream, addr)) = listener.accept().await {
+            tokio::spawn(async move {
+                if let Err(e) = handle_client(client_stream).await {
+                    if !e.to_string().contains("Handshake failed") {
+                        println!("Erro ao processar cliente {}: {}", addr, e);
                     }
                 }
-            }
-
-            if is_ws {
-                println!("Detectado Handshake WebSocket. Encaminhando...");
-                handle_websocket_proxy(client_stream).await?;
-            } else {
-                println!("Detectada requisição HTTP padrão. Encaminhando...");
-                let http_addr = "127.0.0.1:8080";
-                proxy_raw_traffic(client_stream, buf, http_addr).await?;
-            }
-        } else {
-            println!("Protocolo não identificado como OpenVPN ou HTTP. Tentando SSH...");
-            let ssh_addr = "127.0.0.1:22";
-            proxy_raw_traffic(client_stream, buf, ssh_addr).await?;
+            });
         }
     }
+}
+
+async fn handle_client(mut client_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Passo 1: Ler os dados iniciais para detectar o protocolo. É a única mudança necessária no fluxo.
+    let mut buf = BytesMut::with_capacity(4096);
+    client_stream.read_buf(&mut buf).await?;
+
+    // Passo 2: Verificar se é uma requisição de upgrade para WebSocket
+    let mut headers = [EMPTY_HEADER; 16];
+    let mut req = Request::new(&mut headers);
+    let mut is_websocket = false;
+    if req.parse(&buf).is_ok() {
+        if let (Some(upgrade), Some(connection)) = (
+            req.headers.iter().find(|h| h.name.eq_ignore_ascii_case("Upgrade")),
+            req.headers.iter().find(|h| h.name.eq_ignore_ascii_case("Connection")),
+        ) {
+            if String::from_utf8_lossy(upgrade.value).eq_ignore_ascii_case("websocket")
+                && String::from_utf8_lossy(connection.value).contains("Upgrade")
+            {
+                is_websocket = true;
+            }
+        }
+    }
+
+    // Passo 3: Decidir qual lógica usar
+    if is_websocket {
+        // ---- SE FOR WEBSOCKET, USA A NOVA LÓGICA ----
+        println!("Detectado Handshake WebSocket. Iniciando proxy WebSocket...");
+        // A função de proxy WS precisa do stream original, não do buffer, pois a lib faz a leitura.
+        let (client_reader, client_writer) = tokio::io::split(client_stream);
+        let combined_stream = tokio::io::join(client_reader, client_writer);
+        
+        handle_websocket_proxy(combined_stream.0).await?;
+
+    } else {
+        // ---- SE NÃO FOR WEBSOCKET, EXECUTA O SEU CÓDIGO ORIGINAL ----
+        println!("Protocolo não é WebSocket. Usando lógica original para SSH/OpenVPN...");
+
+        // Início da sua Lógica Original (com pequenas adaptações)
+        let status = get_status();
+        
+        // Escreve os dados que já lemos de volta no stream antes de continuarmos
+        let (mut client_reader, mut client_writer) = client_stream.into_split();
+        client_writer.write_all(&buf).await?;
+
+        // Respostas Duplas
+        client_writer.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).await?;
+        client_writer.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes()).await?;
+
+        // Recombina o stream para o peek
+        let mut combined_stream = tokio::io::join(client_reader, client_writer).0;
+
+        // Peek e decisão de proxy
+        let mut addr_proxy = "0.0.0.0:22";
+        if let Ok(Ok(data)) = timeout(Duration::from_secs(1), peek_stream(&combined_stream)).await {
+            if !data.contains("SSH") && !data.is_empty() {
+                addr_proxy = "0.0.0.0:1194";
+            }
+        }
+
+        println!("Redirecionando para: {}", addr_proxy);
+        let server_stream = TcpStream::connect(addr_proxy).await?;
+
+        // Encaminhamento do tráfego
+        let (mut client_read_final, mut client_write_final) = combined_stream.into_split();
+        let (mut server_read, mut server_write) = server_stream.into_split();
+
+        tokio::try_join!(
+            tokio::io::copy(&mut client_read_final, &mut server_write),
+            tokio::io::copy(&mut server_read, &mut client_write_final)
+        )?;
+        // Fim da sua Lógica Original
+    }
+
     Ok(())
 }
 
-// A palavra 'mut' foi removida de 'client_stream' para corrigir o aviso
-async fn proxy_raw_traffic(client_stream: TcpStream, initial_buffer: BytesMut, backend_addr: &str) -> Result<(), Error> {
-    let mut server_stream = match TcpStream::connect(backend_addr).await {
-        Ok(s) => s,
-        Err(e) => {
-            println!("Erro ao conectar ao backend {}: {}", backend_addr, e);
-            return Err(e.into());
+async fn handle_websocket_proxy(client_stream: TcpStream) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ws_client_stream = tokio_tungstenite::accept_async(client_stream).await?;
+    println!("Cliente WebSocket conectado.");
+
+    let backend_ws_addr = "ws://127.0.0.1:8080";
+    let uri: Uri = backend_ws_addr.parse()?;
+    let (ws_server_stream, _) = tokio_tungstenite::connect_async(uri).await?;
+    println!("Conectado ao backend WebSocket.");
+
+    let (mut client_write, mut client_read) = ws_client_stream.split();
+    let (mut server_write, mut server_read) = ws_server_stream.split();
+
+    let c2s = tokio::spawn(async move {
+        while let Some(Ok(msg)) = client_read.next().await {
+            if server_write.send(msg).await.is_err() { break; }
         }
-    };
-    server_stream.write_all(&initial_buffer).await?;
-    let (mut client_read, mut client_write) = client_stream.into_split();
-    let (mut server_read, mut server_write) = server_stream.into_split();
-    tokio::try_join!(
-        tokio::io::copy(&mut client_read, &mut server_write),
-        tokio::io::copy(&mut server_read, &mut client_write)
-    )?;
+    });
+
+    let s2c = tokio::spawn(async move {
+        while let Some(Ok(msg)) = server_read.next().await {
+            if client_write.send(msg).await.is_err() { break; }
+        }
+    });
+
+    tokio::select! { _ = c2s => {}, _ = s2c => {} }
+    println!("Conexão WebSocket encerrada.");
     Ok(())
 }
 
-async fn handle_websocket_proxy(client_tcp_stream: TcpStream) -> Result<(), Error> {
-    let ws_target_addr = "ws://127.0.0.1:8081";
-    let ws_client_stream = match tokio_tungstenite::accept_async(client_tcp_stream).await {
-        Ok(ws) => ws,
-        Err(e) => {
-            println!("Erro no handshake WebSocket com o cliente: {}", e);
-            return Err(Error::new(std::io::ErrorKind::Other, format!("WebSocket handshake failed: {}", e)));
-        }
-    };
-    let uri: Uri = ws_target_addr.parse().expect("URI do WebSocket de destino inválida");
-    let (ws_server_stream, _response) = match tokio_tungstenite::connect_async(uri).await {
-        Ok(res) => res,
-        Err(e) => {
-            println!("Erro ao conectar ao servidor WebSocket {}: {}", ws_target_addr, e);
-            return Err(Error::new(std::io::ErrorKind::Other, format!("Failed to connect to WebSocket target: {}", e)));
-        }
-    };
-    let (mut ws_client_write, mut ws_client_read) = ws_client_stream.split();
-    let (mut ws_server_write, mut ws_server_read) = ws_server_stream.split();
-    tokio::spawn(async move { while let Some(Ok(msg)) = ws_client_read.next().await { if ws_server_write.send(msg).await.is_err() { break; } } });
-    tokio::spawn(async move { while let Some(Ok(msg)) = ws_server_read.next().await { if ws_client_write.send(msg).await.is_err() { break; } } });
-    Ok(())
+async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
+    let mut peek_buffer = vec![0; 2048];
+    let bytes_peeked = stream.peek(&mut peek_buffer).await?;
+    Ok(String::from_utf8_lossy(&peek_buffer[..bytes_peeked]).to_string())
 }
 
-fn get_arg_value(arg_name: &str, default_value: &str) -> String {
-    let args: Vec<String> = env::args().collect();
-    for i in 1..args.len() { if args[i] == arg_name { if i + 1 < args.len() { return args[i + 1].clone(); } } }
-    default_value.to_string()
-}
-
+// Funções utilitárias do código original
 fn get_port() -> u16 {
-    get_arg_value("--port", "80").parse().unwrap_or(80)
+    env::args().nth(1).unwrap_or_else(|| "80".to_string()).parse().unwrap_or(80)
+}
+
+fn get_status() -> String {
+    env::args().nth(2).unwrap_or_else(|| "@RustyManager".to_string())
 }
