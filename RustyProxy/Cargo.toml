@@ -1,11 +1,11 @@
 [package]
 name = "RustyProxy"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.23.1" # Usando uma versão estável
+tokio-tungstenite = "0.27.0"
 httparse = "1.8"
 http = "1.0"
 bytes = "1.0"
