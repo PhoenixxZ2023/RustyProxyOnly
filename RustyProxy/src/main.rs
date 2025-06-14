@@ -1,16 +1,16 @@
 use std::io::{self, Error};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt; // Removido AsyncReadExt
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use clap::Parser;
 use tracing::{error, info, instrument, warn};
-use tokio_tungstenite; // Removidas importações específicas não usadas
+use tokio_tungstenite;
 use futures_util::{StreamExt, SinkExt};
 use httparse::Status;
 
-// --- Estrutura de Configuração (sem alterações) ---
+// --- Estrutura de Configuração (removido --ws-addr, não é mais necessário) ---
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about = "Um proxy TCP/WebSocket para redirecionar tráfego.")]
+#[command(author, version, about = "Um proxy TCP/WebSocket dinâmico para redirecionar tráfego.")]
 struct Args {
     #[arg(long, short, default_value_t = 80)]
     port: u16,
@@ -20,8 +20,6 @@ struct Args {
     ssh_addr: String,
     #[arg(long, default_value = "127.0.0.1:1194")]
     default_addr: String,
-    #[arg(long, default_value = "127.0.0.1:8080")]
-    ws_addr: String,
 }
 
 #[tokio::main]
@@ -44,7 +42,7 @@ async fn main() -> Result<(), Error> {
     }
 }
 
-// --- Roteador Principal (removido 'mut' de stream) ---
+// --- Roteador Principal ---
 #[instrument(skip_all, fields(client_addr = %stream.peer_addr().ok().map_or_else(String::new, |a| a.to_string())))]
 async fn handle_connection_routing(stream: TcpStream, args: Arc<Args>) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0; 2048];
@@ -61,7 +59,8 @@ async fn handle_connection_routing(stream: TcpStream, args: Arc<Args>) -> Result
     if let Ok(Status::Complete(_)) = req.parse(&buffer[..bytes_read]) {
         if is_websocket_request(&req) {
             info!("Requisição WebSocket detectada.");
-            return handle_websocket_proxy(stream, args).await;
+            // Passamos a requisição 'req' para o handler poder ler o Host
+            return handle_websocket_proxy(stream, &req).await;
         }
     }
     
@@ -89,16 +88,34 @@ async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], arg
     Ok(())
 }
 
-// --- Lógica WebSocket (removido 'req' não utilizado) ---
-async fn handle_websocket_proxy(
+// --- LÓGICA WEBSOCKET DINÂMICA ATUALIZADA ---
+async fn handle_websocket_proxy<'a>(
     client_stream: TcpStream,
-    args: Arc<Args>,
+    req: &httparse::Request<'a, '_>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Iniciando proxy WebSocket para {}", &args.ws_addr);
+    // 1. Encontrar o cabeçalho Host
+    let host_header = req.headers.iter().find(|h| h.name.eq_ignore_ascii_case("Host"));
 
-    let (server_ws_stream, _) = tokio_tungstenite::connect_async(&args.ws_addr).await?;
+    let Some(host_header) = host_header else {
+        warn!("Requisição WebSocket sem cabeçalho Host. Descartando.");
+        return Err("Cabeçalho Host ausente na requisição WebSocket".into());
+    };
+
+    let host = std::str::from_utf8(host_header.value)?;
+    // Adiciona a porta 80 se não houver uma especificada no Host
+    let destination_addr = if host.contains(':') {
+        host.to_string()
+    } else {
+        format!("{}:80", host)
+    };
+
+    info!("Iniciando proxy WebSocket para o destino dinâmico: {}", destination_addr);
+
+    // 2. Conectar-se ao destino extraído do Host
+    let (server_ws_stream, _) = tokio_tungstenite::connect_async(&destination_addr).await?;
     info!("Conexão WebSocket com o servidor de destino estabelecida.");
 
+    // 3. O resto da lógica continua igual
     let client_ws_stream = tokio_tungstenite::accept_async(client_stream).await?;
     info!("Handshake com o cliente concluído. A conexão foi promovida para WebSocket.");
 
@@ -122,7 +139,7 @@ async fn handle_websocket_proxy(
     };
     
     futures_util::future::join(client_to_server, server_to_client).await;
-    info!("Conexão WebSocket encerrada.");
+    info!("Conexão WebSocket encerrada para {}", destination_addr);
     Ok(())
 }
 
@@ -130,7 +147,6 @@ async fn handle_websocket_proxy(
 fn is_websocket_request(req: &httparse::Request) -> bool {
     let mut connection_upgrade = false;
     let mut is_upgrade_ws = false;
-
     for header in req.headers.iter() {
         let key = header.name.to_lowercase();
         let value = String::from_utf8_lossy(header.value).to_lowercase();
