@@ -7,7 +7,6 @@ use httparse::{Request, EMPTY_HEADER};
 use futures_util::{StreamExt, SinkExt};
 use http::Uri;
 
-// Função principal, sem alterações
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let port = get_port();
@@ -17,7 +16,6 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-// Função de loop, sem alterações
 async fn start_http(listener: TcpListener) {
     loop {
         match listener.accept().await {
@@ -37,9 +35,6 @@ async fn start_http(listener: TcpListener) {
     }
 }
 
-// ================================================================
-// A NOVA LÓGICA DE DETECÇÃO ESTÁ AQUI
-// ================================================================
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let mut buf = BytesMut::with_capacity(8192);
 
@@ -48,23 +43,13 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         return Ok(());
     }
 
-    // Critério de decisão:
-    // 1. É OpenVPN? (Verifica bytes específicos)
-    // 2. Se não, é um upgrade para WebSocket? (Tenta parse HTTP)
-    // 3. Se não, é HTTP padrão.
-
-    // Padrão de bytes de um handshake OpenVPN sobre TCP (P_CONTROL_V1)
-    // O primeiro byte é o tipo de opcode (0x38), precedido pelo tamanho do pacote.
-    // Vamos verificar de forma simples se o opcode está presente nos primeiros bytes.
     let is_openvpn = buf.len() > 2 && buf[2] == 0x38;
 
     if is_openvpn {
         println!("Detectado tráfego OpenVPN. Encaminhando...");
-        let openvpn_addr = "127.0.0.1:1194"; // Porta do seu servidor OpenVPN
+        let openvpn_addr = "127.0.0.1:1194";
         proxy_raw_traffic(client_stream, buf, openvpn_addr).await?;
-
     } else {
-        // Se não for OpenVPN, tentamos tratar como HTTP
         let mut headers = [EMPTY_HEADER; 32];
         let mut req = Request::new(&mut headers);
         
@@ -83,25 +68,23 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
             if is_ws {
                 println!("Detectado Handshake WebSocket. Encaminhando...");
-                handle_websocket_proxy(client_stream).await?; // A lib Tungstenite relê o buffer
+                handle_websocket_proxy(client_stream).await?;
             } else {
                 println!("Detectada requisição HTTP padrão. Encaminhando...");
-                let http_addr = "127.0.0.1:80"; // Porta do seu Nginx/Apache
+                let http_addr = "127.0.0.1:8080";
                 proxy_raw_traffic(client_stream, buf, http_addr).await?;
             }
         } else {
-            // Se não for OpenVPN e não for um HTTP válido, podemos assumir que é SSH
             println!("Protocolo não identificado como OpenVPN ou HTTP. Tentando SSH...");
-            let ssh_addr = "127.0.0.1:22"; // Porta do seu servidor SSH
+            let ssh_addr = "127.0.0.1:22";
             proxy_raw_traffic(client_stream, buf, ssh_addr).await?;
         }
     }
-
     Ok(())
 }
 
-// Função genérica para encaminhar tráfego bruto (usada por HTTP, OpenVPN e SSH)
-async fn proxy_raw_traffic(mut client_stream: TcpStream, initial_buffer: BytesMut, backend_addr: &str) -> Result<(), Error> {
+// A palavra 'mut' foi removida de 'client_stream' para corrigir o aviso
+async fn proxy_raw_traffic(client_stream: TcpStream, initial_buffer: BytesMut, backend_addr: &str) -> Result<(), Error> {
     let mut server_stream = match TcpStream::connect(backend_addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -119,9 +102,8 @@ async fn proxy_raw_traffic(mut client_stream: TcpStream, initial_buffer: BytesMu
     Ok(())
 }
 
-// Função de proxy WebSocket (simplificada, pois o buffer inicial é lido pela lib)
 async fn handle_websocket_proxy(client_tcp_stream: TcpStream) -> Result<(), Error> {
-    let ws_target_addr = "ws://127.0.0.1:8080";
+    let ws_target_addr = "ws://127.0.0.1:8081";
     let ws_client_stream = match tokio_tungstenite::accept_async(client_tcp_stream).await {
         Ok(ws) => ws,
         Err(e) => {
@@ -144,12 +126,12 @@ async fn handle_websocket_proxy(client_tcp_stream: TcpStream) -> Result<(), Erro
     Ok(())
 }
 
-// Funções utilitárias, sem alterações
 fn get_arg_value(arg_name: &str, default_value: &str) -> String {
     let args: Vec<String> = env::args().collect();
     for i in 1..args.len() { if args[i] == arg_name { if i + 1 < args.len() { return args[i + 1].clone(); } } }
     default_value.to_string()
 }
+
 fn get_port() -> u16 {
     get_arg_value("--port", "80").parse().unwrap_or(80)
 }
