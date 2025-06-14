@@ -6,8 +6,7 @@ use tokio::{time::Duration};
 use tokio::time::timeout;
 
 // --- Imports de tokio-tungstenite ---
-// WebSocketStream foi removido, pois a inferência de tipo é suficiente.
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig; // Para configurar o WebSocket
+// A importação explícita de WebSocketConfig foi removida para corrigir o aviso.
 
 // --- Imports de HTTP e bytes ---
 use http::Uri;
@@ -58,7 +57,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let parse_status = req.parse(&buf)
         .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, format!("Erro de parsing HTTP: {}", e)))?;
 
-    let is_websocket_upgrade = if let httparse::Status::Complete(_offset) = parse_status { // _offset para ignorar warning
+    let is_websocket_upgrade = if let httparse::Status::Complete(_offset) = parse_status {
         let mut upgrade_found = false;
         let mut connection_upgrade_found = false;
 
@@ -81,8 +80,6 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     } else {
         let status = get_status();
         
-        // CORREÇÃO 2: A linha que enviava '101' foi REMOVIDA.
-        // Apenas a resposta '200 OK' é enviada.
         client_stream
             .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
             .await?;
@@ -132,7 +129,6 @@ async fn handle_websocket_proxy(
 ) -> Result<(), Error> {
     println!("Iniciando proxy WebSocket...");
 
-    // CORREÇÃO 1: Usar WebSocketConfig::default() para criar a configuração.
     let ws_client_stream = match tokio_tungstenite::accept_async_with_config(
         client_tcp_stream,
         Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()),
@@ -198,7 +194,10 @@ async fn handle_websocket_proxy(
         Ok::<(), Error>(())
     });
 
-    tokio::try_join!(client_to_server_ws, server_to_client_ws)?;
+    // CORREÇÃO DOS AVISOS: Checa o resultado de cada tarefa individualmente.
+    let (client_res, server_res) = tokio::try_join!(client_to_server_ws, server_to_client_ws)?;
+    client_res?;
+    server_res?;
 
     Ok(())
 }
