@@ -1,15 +1,14 @@
 use std::io::{self, Error};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt; // Removido AsyncReadExt
 use tokio::net::{TcpListener, TcpStream};
 use clap::Parser;
 use tracing::{error, info, instrument, warn};
-use tokio_tungstenite::{WebSocketStream, MaybeTlsStream};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite; // Removidas importações específicas não usadas
 use futures_util::{StreamExt, SinkExt};
 use httparse::Status;
 
-// --- Estrutura de Configuração Atualizada ---
+// --- Estrutura de Configuração (sem alterações) ---
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Um proxy TCP/WebSocket para redirecionar tráfego.")]
 struct Args {
@@ -45,9 +44,9 @@ async fn main() -> Result<(), Error> {
     }
 }
 
-// --- Roteador Principal ---
+// --- Roteador Principal (removido 'mut' de stream) ---
 #[instrument(skip_all, fields(client_addr = %stream.peer_addr().ok().map_or_else(String::new, |a| a.to_string())))]
-async fn handle_connection_routing(mut stream: TcpStream, args: Arc<Args>) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_connection_routing(stream: TcpStream, args: Arc<Args>) -> Result<(), Box<dyn std::error::Error>> {
     let mut buffer = [0; 2048];
     let bytes_read = stream.peek(&mut buffer).await?;
 
@@ -56,25 +55,22 @@ async fn handle_connection_routing(mut stream: TcpStream, args: Arc<Args>) -> Re
         return Ok(());
     }
 
-    // Tenta parsear como uma requisição HTTP
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
     
     if let Ok(Status::Complete(_)) = req.parse(&buffer[..bytes_read]) {
-         // Se for uma requisição de WebSocket, usa o proxy específico
         if is_websocket_request(&req) {
             info!("Requisição WebSocket detectada.");
-            return handle_websocket_proxy(stream, req, args).await;
+            return handle_websocket_proxy(stream, args).await;
         }
     }
     
-    // Se não for WebSocket, continua com a lógica original (TCP "burro")
     info!("Conexão não é WebSocket. Tratando como TCP puro.");
     handle_tcp_proxy(stream, &buffer[..bytes_read], args).await?;
     Ok(())
 }
 
-// --- Lógica Original para TCP (SSH/Padrão) ---
+// --- Lógica TCP (sem alterações) ---
 async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], args: Arc<Args>) -> io::Result<()> {
     client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", args.status).as_bytes()).await?;
 
@@ -93,59 +89,44 @@ async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], arg
     Ok(())
 }
 
-
-// --- NOVA Lógica para Proxy WebSocket ---
-async fn handle_websocket_proxy<'a>(
+// --- Lógica WebSocket (removido 'req' não utilizado) ---
+async fn handle_websocket_proxy(
     client_stream: TcpStream,
-    req: httparse::Request<'a, 'a>,
     args: Arc<Args>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("Iniciando proxy WebSocket para {}", &args.ws_addr);
 
-    // Conecta-se ao servidor de destino como um cliente WebSocket
     let (server_ws_stream, _) = tokio_tungstenite::connect_async(&args.ws_addr).await?;
     info!("Conexão WebSocket com o servidor de destino estabelecida.");
 
-    // Aceita a conexão do nosso cliente, tornando-o um servidor WebSocket
     let client_ws_stream = tokio_tungstenite::accept_async(client_stream).await?;
     info!("Handshake com o cliente concluído. A conexão foi promovida para WebSocket.");
 
-    // Divide os streams em partes de leitura (Stream) e escrita (Sink)
     let (mut client_write, mut client_read) = client_ws_stream.split();
     let (mut server_write, mut server_read) = server_ws_stream.split();
 
-    // Cria as duas tarefas de encaminhamento
     let client_to_server = async {
         while let Some(msg) = client_read.next().await {
             if let Ok(msg) = msg {
-                if server_write.send(msg).await.is_err() {
-                    break;
-                }
-            } else {
-                break;
-            }
+                if server_write.send(msg).await.is_err() { break; }
+            } else { break; }
         }
     };
 
     let server_to_client = async {
         while let Some(msg) = server_read.next().await {
             if let Ok(msg) = msg {
-                if client_write.send(msg).await.is_err() {
-                    break;
-                }
-            } else {
-                break;
-            }
+                if client_write.send(msg).await.is_err() { break; }
+            } else { break; }
         }
     };
     
-    // Executa as duas tarefas concorrentemente
     futures_util::future::join(client_to_server, server_to_client).await;
     info!("Conexão WebSocket encerrada.");
     Ok(())
 }
 
-// --- Função Auxiliar para Checar Cabeçalhos WebSocket ---
+// --- Função Auxiliar (sem alterações) ---
 fn is_websocket_request(req: &httparse::Request) -> bool {
     let mut connection_upgrade = false;
     let mut is_upgrade_ws = false;
