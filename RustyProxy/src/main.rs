@@ -1,6 +1,6 @@
 use std::io::{self, Error};
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt}; // <--- CORREÇÃO APLICADA AQUI
 use tokio::net::{TcpListener, TcpStream};
 use clap::Parser;
 use tracing::{error, info, instrument, warn};
@@ -8,7 +8,7 @@ use tokio_tungstenite;
 use futures_util::{StreamExt, SinkExt};
 use httparse::Status;
 
-// --- Melhoria: Usando 'clap' para a melhor configuração ---
+// --- Estrutura de Configuração ---
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about = "Um proxy TCP/WebSocket dinâmico e robusto.")]
 struct Args {
@@ -24,7 +24,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Melhoria: Usando 'tracing' para logging profissional
+    // Usando 'tracing' para logging profissional
     tracing_subscriber::fmt::init();
     let args = Arc::new(Args::parse());
 
@@ -77,15 +77,16 @@ async fn handle_connection_routing(stream: TcpStream, args: Arc<Args>) -> Result
     Ok(())
 }
 
-// --- Lógica TCP usando copy_bidirectional ---
+// --- Lógica TCP ---
 async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], args: Arc<Args>) -> io::Result<()> {
     // A troca de respostas HTTP para "enganar" o firewall
     client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", args.status).as_bytes()).await?;
-    // Consumir os dados que já foram lidos pelo peek
+    
+    // Consome os dados que já foram lidos pelo peek para não os perdermos
     let mut temp_buf = vec![0; initial_data.len()];
     client_stream.read_exact(&mut temp_buf).await?;
-    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", args.status).as_bytes()).await?;
 
+    client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", args.status).as_bytes()).await?;
 
     let data_str = String::from_utf8_lossy(initial_data);
     let proxy_addr = if data_str.contains("SSH") {
@@ -100,7 +101,6 @@ async fn handle_tcp_proxy(mut client_stream: TcpStream, initial_data: &[u8], arg
     match server_stream_result {
         Ok(mut server_stream) => {
             info!("Conexão TCP estabelecida com {}. Iniciando proxy.", proxy_addr);
-            // Melhoria: Usando copy_bidirectional no lugar de transfer_data manual
             tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream).await?;
         }
         Err(e) => {
