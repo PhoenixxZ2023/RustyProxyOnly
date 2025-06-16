@@ -1,14 +1,15 @@
 use std::env;
 use std::io::Error;
-// Removidos os imports de Arc e Mutex, pois não são mais necessários para transfer_data
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::{time::Duration};
-use tokio::time::timeout;
+use tokio::time::{timeout, Duration};
+const BUFFER_SIZE: usize = 32768;
+const SSH_KEYWORD: &str = "SSH";
+const SSH_TARGET_ADDR: &str = "127.0.0.1:22";       
+const OPENVPN_TARGET_ADDR: &str = "127.0.0.1:1194"; 
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Iniciando o proxy
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("Iniciando serviço na porta: {}", port);
@@ -39,51 +40,48 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    let mut buffer = vec![0; 32768];
-    // O read aqui parece ser para consumir algo do cliente após o 101, mas
-    // não é usado para nada significativo depois. Considere se é realmente necessário.
+    let mut buffer = vec![0; BUFFER_SIZE];
     client_stream.read(&mut buffer).await?;
     client_stream
         .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    // --- Melhoria 2: Tratamento de Erros Mais Robusto ---
     let peek_result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await;
 
     let data_to_check = match peek_result {
-        Ok(Ok(data)) => data, // Sucesso em peek_stream dentro do timeout
+        Ok(Ok(data)) => data,
         Ok(Err(e)) => {
             println!("Erro ao espiar o stream: {}", e);
-            String::new() // Continua, mas com uma string vazia
-        },
+            String::new()
+        }
         Err(_) => {
-            // Timeout ocorreu
             println!("Tempo limite excedido ao espiar o stream.");
-            String::new() // Continua, mas com uma string vazia
+            String::new()
         }
     };
 
-    let mut addr_proxy = "0.0.0.0:22"; // Valor padrão para SSH
-
-    if data_to_check.contains("SSH") || data_to_check.is_empty() {
-        addr_proxy = "0.0.0.0:22";
+    let addr_proxy: &str;
+    if data_to_check.contains(SSH_KEYWORD) || data_to_check.is_empty() {
+        addr_proxy = SSH_TARGET_ADDR;
     } else {
-        addr_proxy = "0.0.0.0:1194";
+        addr_proxy = OPENVPN_TARGET_ADDR;
     }
 
     let server_connect = TcpStream::connect(addr_proxy).await;
     let server_stream = match server_connect {
         Ok(s) => s,
         Err(e) => {
-            println!("Erro ao iniciar conexão para o proxy {}: {}", addr_proxy, e);
-            return Ok(()); // Retorna Ok(()) para a tarefa não falhar, mas o erro é logado.
+            println!(
+                "Erro ao iniciar conexão para o proxy {}: {}",
+                addr_proxy, e
+            );
+            return Ok(());
         }
     };
 
     let (client_read, client_write) = client_stream.into_split();
     let (server_read, server_write) = server_stream.into_split();
 
-    // --- Melhoria 1: Metades do Stream Passadas Diretamente (sem Arc<Mutex>) ---
     let client_to_server = transfer_data(client_read, server_write);
     let server_to_client = transfer_data(server_read, client_write);
 
@@ -92,17 +90,16 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     Ok(())
 }
 
-// --- Melhoria 1: Assinatura da Função transfer_data Alterada ---
 async fn transfer_data(
-    mut read_stream: tokio::net::tcp::OwnedReadHalf, // Recebe por valor
-    mut write_stream: tokio::net::tcp::OwnedWriteHalf, // Recebe por valor
+    mut read_stream: tokio::net::tcp::OwnedReadHalf,
+    mut write_stream: tokio::net::tcp::OwnedWriteHalf,
 ) -> Result<(), Error> {
-    let mut buffer = [0; 32768];
+    let mut buffer = [0; BUFFER_SIZE];
     loop {
         let bytes_read = read_stream.read(&mut buffer).await?;
 
         if bytes_read == 0 {
-            break; // Conexão fechada
+            break;
         }
 
         write_stream.write_all(&buffer[..bytes_read]).await?;
@@ -119,7 +116,6 @@ async fn peek_stream(stream: &TcpStream) -> Result<String, Error> {
     Ok(data_str.to_string())
 }
 
-// --- Melhoria 3: Funções get_port e get_status Refatoradas ---
 fn get_arg_value(arg_name: &str, default_value: &str) -> String {
     let args: Vec<String> = env::args().collect();
     for i in 1..args.len() {
