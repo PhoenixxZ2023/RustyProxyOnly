@@ -1,1 +1,45 @@
-/.idea
+# =========================
+# JetBrains / IntelliJ / RustRover
+# =========================
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# =========================
+# Rust
+# =========================
+target/
+**/*.rs.bk
+
+# Se este projeto gera binário/aplicação final e você quer build reprodutível,
+# você PODE versionar o Cargo.lock (remova a linha abaixo).
+Cargo.lock
+
+# =========================
+# Shell / logs / temporários
+# =========================
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+nohup.out
+
+# =========================
+# Linux / macOS / Windows
+# =========================
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# Editor / tooling genérico
+# =========================
+.vscode/
+.history/
+*.orig
