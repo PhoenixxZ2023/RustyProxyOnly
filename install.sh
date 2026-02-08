@@ -1,137 +1,282 @@
-#!/bin/bash
-# Instalação Rusty Proxy
+#!/usr/bin/env bash
+# Instalação Rusty Proxy (Opção B - EnvironmentFile)
 
-TOTAL_STEPS=9
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+TOTAL_STEPS=10
 CURRENT_STEP=0
 
+LOG_FILE="/var/log/rustyproxy-install.log"
+
+RUSTY_DIR="/opt/rustyproxy"
+ENV_DIR="/etc/rustyproxy"
+UNIT_TEMPLATE="/etc/systemd/system/proxy@.service"
+PORTS_FILE="${RUSTY_DIR}/ports"
+
+CLONE_DIR="/root/RustyProxyOnly"
+REPO_URL='https://github.com/PhoenixxZ2023/RustyProxyOnly.git'
+REPO_REF="${RUSTYPROXY_REF:-main}"          # export RUSTYPROXY_REF=<tag|commit>
+DO_UPGRADE="${RUSTYPROXY_UPGRADE:-0}"       # 1 = faz apt upgrade
+
 show_progress() {
-    PERCENT=$((CURRENT_STEP * 100 / TOTAL_STEPS))
-    echo "Progresso: [${PERCENT}%] - $1"
+  local msg="$1"
+  local percent=$(( CURRENT_STEP * 100 / TOTAL_STEPS ))
+  echo "Progresso: [${percent}%] - ${msg}"
 }
 
 error_exit() {
-    echo -e "\nErro: $1"
+  echo -e "\nErro: $1"
+  echo -e "\n--- Últimas linhas do log (${LOG_FILE}) ---"
+  tail -n 80 "${LOG_FILE}" 2>/dev/null || true
+  exit 1
+}
+
+increment_step() { CURRENT_STEP=$((CURRENT_STEP + 1)); }
+
+trap 'error_exit "Falha na linha $LINENO."' ERR
+
+run() { "$@" >>"${LOG_FILE}" 2>&1; }
+
+require_root() {
+  [[ "${EUID}" -eq 0 ]] || error_exit "EXECUTE COMO ROOT (sudo)."
+}
+
+detect_os() {
+  if ! command -v lsb_release >/dev/null 2>&1; then
+    run apt-get update -y
+    run apt-get install -y lsb-release
+  fi
+
+  local os ver
+  os="$(lsb_release -is)"
+  ver="$(lsb_release -rs)"
+
+  case "${os}" in
+    Ubuntu)
+      case "${ver}" in
+        24.*|22.*|20.*|18.*) : ;;
+        *) error_exit "UBUNTU NÃO SUPORTADO. USE 18/20/22/24." ;;
+      esac
+      ;;
+    Debian)
+      case "${ver}" in
+        12*|11*|10*|9*) : ;;
+        *) error_exit "DEBIAN NÃO SUPORTADO. USE 9/10/11/12." ;;
+      esac
+      ;;
+    *) error_exit "SISTEMA NÃO SUPORTADO. USE UBUNTU OU DEBIAN." ;;
+  esac
+}
+
+ensure_deps() {
+  export DEBIAN_FRONTEND=noninteractive
+  run apt-get update -y
+  if [[ "${DO_UPGRADE}" == "1" ]]; then
+    run apt-get upgrade -y
+  fi
+  run apt-get install -y curl build-essential git pkg-config libssl-dev ca-certificates
+}
+
+ensure_rust() {
+  if command -v cargo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local tmp
+  tmp="$(mktemp -t rustup-init.XXXXXX.sh)"
+  run curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "${tmp}"
+  run sh "${tmp}" -y --profile minimal --no-modify-path
+  rm -f "${tmp}"
+
+  if [[ -f "/root/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    source "/root/.cargo/env"
+  fi
+  command -v cargo >/dev/null 2>&1 || error_exit "Falha ao disponibilizar cargo após rustup."
+}
+
+install_rustyproxy() {
+  rm -rf "${CLONE_DIR}" || true
+  run git clone --branch "${REPO_REF}" "${REPO_URL}" "${CLONE_DIR}"
+
+  run mkdir -p "${RUSTY_DIR}" "${ENV_DIR}"
+
+  # instala menu (opção B)
+  [[ -f "${CLONE_DIR}/menu.sh" ]] || error_exit "menu.sh não encontrado no repo."
+  run install -m 0755 "${CLONE_DIR}/menu.sh" "${RUSTY_DIR}/menu"
+
+  # build Rust
+  [[ -d "${CLONE_DIR}/RustyProxy" ]] || error_exit "Diretório Rust não encontrado: ${CLONE_DIR}/RustyProxy"
+  pushd "${CLONE_DIR}/RustyProxy" >/dev/null
+  run cargo build --release --jobs "$(nproc)"
+  popd >/dev/null
+
+  [[ -f "${CLONE_DIR}/RustyProxy/target/release/RustyProxy" ]] || error_exit "Binário não encontrado em target/release/RustyProxy"
+  run install -m 0755 "${CLONE_DIR}/RustyProxy/target/release/RustyProxy" "${RUSTY_DIR}/proxy"
+
+  # arquivos de controle
+  run touch "${PORTS_FILE}"
+  run chmod 600 "${PORTS_FILE}"
+  run chmod 700 "${ENV_DIR}"
+}
+
+install_unit_template() {
+  # template systemd para proxy@PORT.service
+  cat >"${UNIT_TEMPLATE}" <<'EOF'
+[Unit]
+Description=RustyProxy instance on port %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/rustyproxy/proxy%i.env
+ExecStart=/opt/rustyproxy/proxy --port %i --status ${STATUS}
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+# Hardening (ajuste se precisar)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  run systemctl daemon-reload
+}
+
+install_cli() {
+  # CLI simples para status/listagem sem entrar no menu
+  cat >/usr/local/bin/rustyproxyctl <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+PORTS_FILE="/opt/rustyproxy/ports"
+
+usage() {
+  cat <<USAGE
+Uso:
+  rustyproxyctl list        # lista portas + status salvo
+  rustyproxyctl status      # mostra estado systemd de cada porta
+  rustyproxyctl logs <port> # logs do serviço (últimas 200 linhas)
+USAGE
+}
+
+cmd="${1:-status}"
+
+case "$cmd" in
+  list)
+    if [[ ! -s "$PORTS_FILE" ]]; then
+      echo "Nenhuma porta cadastrada."
+      exit 0
+    fi
+    echo "PORTA | STATUS"
+    echo "--------------"
+    cat "$PORTS_FILE"
+    ;;
+  status)
+    if [[ ! -s "$PORTS_FILE" ]]; then
+      echo "Nenhuma porta cadastrada."
+      exit 0
+    fi
+    while IFS='|' read -r port status; do
+      [[ -n "${port:-}" ]] || continue
+      svc="proxy@${port}.service"
+      state="$(systemctl is-active "$svc" 2>/dev/null || true)"
+      enabled="$(systemctl is-enabled "$svc" 2>/dev/null || true)"
+      printf "port=%s  active=%s  enabled=%s  status=%s\n" "$port" "$state" "$enabled" "${status:-}"
+    done < "$PORTS_FILE"
+    ;;
+  logs)
+    port="${2:-}"
+    [[ "$port" =~ ^[0-9]+$ ]] || { echo "Informe uma porta válida."; exit 1; }
+    journalctl -u "proxy@${port}.service" -n 200 --no-pager
+    ;;
+  *)
+    usage
     exit 1
+    ;;
+esac
+EOF
+
+  chmod 0755 /usr/local/bin/rustyproxyctl
 }
 
-increment_step() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
+setup_links() {
+  # link do menu principal
+  run ln -sf "${RUSTY_DIR}/menu" /usr/local/bin/rustyproxy
 }
 
-if [ "$EUID" -ne 0 ]; then
-    error_exit "EXECUTE COMO ROOT"
-else
-    clear
-    echo ""
-echo -e "\033[0;34m           ╦═╗╦ ╦╔═╗╔╦╗╦ ╦  ╔═╗╦═╗╔═╗═╗ ╦╦ ╦                    "
-echo -e "\033[0;37m           ╠╦╝║ ║╚═╗ ║ ╚╦╝  ╠═╝╠╦╝║ ║╔╩╦╝╚╦╝                    "
-echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚═╚═╝╩ ╚═ ╩  \033[0;37m2025        "
-    echo -e " "             
-    echo -e " "
-    show_progress "ATUALIZANDO REPOSITÓRIO..."
-    export DEBIAN_FRONTEND=noninteractive
-    apt update -y > /dev/null 2>&1 || error_exit "Falha ao atualizar os repositorios"
-    increment_step
+cleanup() {
+  rm -rf "${CLONE_DIR}" || true
+}
 
-    # ---->>>> Verificação do sistema
-    show_progress "VERIFICANDO SISTEMA..."
-    if ! command -v lsb_release &> /dev/null; then
-        apt install lsb-release -y > /dev/null 2>&1 || error_exit "Falha ao instalar lsb-release"
-    fi
-    increment_step
+main() {
+  require_root
+  : > "${LOG_FILE}"
 
-    # ---->>>> Verificação do sistema (Lógica inalterada, apenas progresso)
-    OS_NAME=$(lsb_release -is)
-    VERSION=$(lsb_release -rs)
+  clear
+  echo ""
+  echo -e "\033[0;34m           ╦═╗╦ ╦╔═╗╔╦╗╦ ╦  ╔═╗╦═╗╔═╗═╗ ╦╦ ╦"
+  echo -e "\033[0;37m           ╠╦╝║ ║╚═╗ ║ ╚╦╝  ╠═╝╠╦╝║ ║╔╩╦╝╚╦╝"
+  echo -e "\033[0;34m           ╩╚═╚═╝╚═╝ ╩  ╩   ╩  ╩╚═╚═╝╩ ╚═ ╩"
+  echo -e " "
 
-    case $OS_NAME in
-        Ubuntu)
-            case $VERSION in
-                24.*|22.*|20.*|18.*)
-                    show_progress "SISTEMA UBUNTU SUPORTADO, CONTINUANDO..."
-                    ;;
-                *)
-                    error_exit "VERSÃO DO UBUNTU NÃO SUPORTADA. USE UBUNTU 18, 20, 22 ou 24."
-                    ;;
-            esac
-            ;;
-        Debian)
-            case $VERSION in
-                12*|11*|10*|9*)
-                    show_progress "SISTEMA DEBIAN SUPORTADO, CONTINUANDO..."
-                    ;;
-                *)
-                    error_exit "VERSÃO DO DEBIAN NÃO SUPORTADA. USE DEBIAN 9, 10, 11 ou 12."
-                    ;;
-            esac
-            ;;
-        *)
-            error_exit "SISTEMA NÃO SUPORTADO. USE UBUNTU OU DEBIAN."
-            ;;
-    esac
-    increment_step
+  show_progress "VERIFICANDO SISTEMA..."
+  detect_os
+  increment_step
 
-    # ---->>>> Instalação de pacotes requisitos e atualização do sistema
-    show_progress "ATUALIZANDO O SISTEMA E INSTALANDO DEPENDÊNCIAS, AGUARDE..."
-    # Esta linha instala as dependências de compilação, incluindo pkg-config e libssl-dev.
-    apt upgrade -y > /dev/null 2>&1 || error_exit "Falha ao atualizar o sistema"
-    apt-get install curl build-essential git pkg-config libssl-dev -y > /dev/null 2>&1 || error_exit "Falha ao instalar pacotes essenciais (curl, build-essential, git, pkg-config, libssl-dev)"
-    increment_step
+  show_progress "INSTALANDO DEPENDÊNCIAS..."
+  ensure_deps
+  increment_step
 
-    # ---->>>> Criando o diretório do script
-    show_progress "CRIANDO DIRETÓRIO PARA O PROXY..."
-    mkdir -p /opt/rustyproxy > /dev/null 2>&1 || error_exit "Falha ao criar o diretório /opt/rustyproxy"
-    increment_step
+  show_progress "INSTALANDO RUST (se necessário)..."
+  ensure_rust
+  increment_step
 
-    # ---->>>> Instalar rust
-    show_progress "INSTALANDO RUST TOOLCHAIN, ISSO PODE LEVAR ALGUNS MINUTOS..."
-    if ! command -v rustc &> /dev/null; then
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1 || error_exit "Falha ao instalar Rust"
-        source "/root/.cargo/env" || error_exit "Falha ao carregar o ambiente Rust. Verifique a instalação do Rust."
-    else
-        echo "Rust já está instalado."
-    fi
-    increment_step
+  show_progress "CLONANDO E COMPILANDO..."
+  install_rustyproxy
+  increment_step
 
-    # ---->>>> Instalar o RustyProxy
-    show_progress "CLONANDO E COMPILANDO RUSTYPROXY, ISSO PODE LEVAR UM TEMPO, AGUARDE..."
+  show_progress "INSTALANDO TEMPLATE SYSTEMD (proxy@PORT)..."
+  install_unit_template
+  increment_step
 
-    if [ -d "/root/RustyProxyOnly" ]; then
-        rm -rf /root/RustyProxyOnly || error_exit "Falha ao remover diretório antigo de clone"
-    fi
+  show_progress "INSTALANDO rustyproxyctl (CLI)..."
+  install_cli
+  increment_step
 
-    git clone --branch "main" https://github.com/PhoenixxZ2023/RustyProxyOnly.git /root/RustyProxyOnly > /dev/null 2>&1 || error_exit "Falha ao clonar o repositório RustyProxyOnly"
-    
-    mv /root/RustyProxyOnly/menu.sh /opt/rustyproxy/menu || error_exit "Falha ao mover o script de menu"
-    
-    cd /root/RustyProxyOnly/RustyProxy || error_exit "Diretório do projeto Rust não encontrado"
-    
-    # *** ESTA É A LINHA QUE MOSTRA OS ERROS DE COMPILAÇÃO ***
-    cargo build --release --jobs $(nproc) || error_exit "Falha ao compilar o RustyProxy. Verifique o output acima para detalhes."
-    
-    mv ./target/release/RustyProxy /opt/rustyproxy/proxy || error_exit "Falha ao mover o executável compilado"
-    increment_step
+  show_progress "CRIANDO LINK DO MENU (rustyproxy)..."
+  setup_links
+  increment_step
 
-    # ---->>>> Configuração de permissões
-    show_progress "CONFIGURANDO PERMISSÕES E CRIANDO LINK SIMBÓLICO..."
-    chmod +x /opt/rustyproxy/proxy || error_exit "Falha ao definir permissões para o proxy"
-    chmod +x /opt/rustyproxy/menu || error_exit "Falha ao definir permissões para o menu"
-    ln -sf /opt/rustyproxy/menu /usr/local/bin/rustyproxy || error_exit "Falha ao criar link simbólico para o menu"
-    increment_step
+  show_progress "LIMPANDO..."
+  cleanup
+  increment_step
 
-    # ---->>>> Limpeza
-    show_progress "LIMPANDO DIRETÓRIOS TEMPORÁRIOS, AGUARDE..."
-    cd /root/ || error_exit "Não foi possível retornar ao diretório /root/"
-    rm -rf /root/RustyProxyOnly/ || error_exit "Falha ao limpar diretórios temporários"
-    increment_step
+  clear
+  echo -e " "
+  echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
+  echo -e "\E[44;1;37m        INSTALAÇÃO FINALIZADA COM SUCESSO               \E[0m"
+  echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
+  echo -e " "
+  echo -e "\033[1;33mLOG:\033[0m ${LOG_FILE}"
+  echo -e "\033[1;33mMENU:\033[0m  rustyproxy"
+  echo -e "\033[1;33mCLI:\033[0m   rustyproxyctl status | rustyproxyctl list | rustyproxyctl logs <porta>"
+  echo -e " "
+}
 
-    # ---->>>> Instalação finalizada :)
-clear
-echo -e " "
-echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
-echo -e "\E[44;1;37m        INSTALAÇÃO FINALIZADA COM SUCESSO               \E[0m"
-echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
-echo -e " "
-echo -e "\033[1;31m \033[1;33mDIGITE O COMANDO PARA ACESSAR O MENU: \033[1;32mrustyproxy\033[0m"
-echo -e " "
-fi
+main "$@"
