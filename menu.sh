@@ -213,7 +213,7 @@ show_menu() {
     active_ports="$(cut -d'|' -f1 "$PORTS_FILE" | paste -sd ' ' -)"
     echo -e "\033[1;36m┃\033[1;33mPORTAS ATIVAS:\033[1;33m $(printf '%-21s' "$active_ports")   \033[1;36m┃\033[0m"
   else
-    echo -e "\033[1;36m┃\033[1;33mPORTAS ATIVAS:\033[1;33m (nenhuma)                 \033[1;36m┃\033[0m"
+    echo -e "\033[1;36m┃\033[1;33mPORTAS ATIVAS:\033[1;33m (nenhuma)              \033[1;36m┃\033[0m"
   fi
 
   echo -e "\033[1;36m┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\033[0m"
