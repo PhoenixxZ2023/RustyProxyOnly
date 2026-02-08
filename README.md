@@ -37,10 +37,11 @@ Dependências instaladas automaticamente:
 
 ### Instalar (branch main)
 
-```bash
+````
 bash <(curl -fsSL https://raw.githubusercontent.com/PhoenixxZ2023/RustyProxyOnly/main/install.sh)
+````
 
-```bash
+````
 bash <(wget -qO- https://raw.githubusercontent.com/PhoenixxZ2023/RustyProxyOnly/refs/heads/main/install.sh)
-```
+````
 
