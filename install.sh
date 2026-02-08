@@ -287,7 +287,7 @@ main() {
   echo -e "\033[1;34m\033[1m                INSTALAÇÃO CONCLUÍDA COM SUCESSO               \033[0m"
   echo -e "\033[1;34m==============================================================\033[0m"
   echo -e " "
-  echo -e "\033[1;34m\033[1mDIGITE:\033[0m \033[1;37mRUSTYPROXY\033[0m"
+  echo -e "\033[1;34m\033[1mDIGITE:\033[0m \033[1;37mrustyproxy\033[0m"
   echo -e " "
 }
 
