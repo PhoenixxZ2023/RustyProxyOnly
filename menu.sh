@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RUSTYPROXY MANAGER (Opção B - EnvironmentFile)
+# RUSTYPROXY MANAGER (Opção B - EnvironmentFile) - final
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -7,7 +7,7 @@ IFS=$'\n\t'
 PORTS_FILE="/opt/rustyproxy/ports"
 PROXY_BIN="/opt/rustyproxy/proxy"
 
-UNIT_DIR="/etc/systemd/system"
+UNIT_TEMPLATE="/etc/systemd/system/proxy@.service"
 ENV_DIR="/etc/rustyproxy"
 
 RED="\033[1;31m"
@@ -24,18 +24,19 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 [[ -x "${PROXY_BIN}" ]] || { echo -e "${RED}Binário não encontrado/executável: ${PROXY_BIN}${RESET}"; exit 1; }
+[[ -f "${UNIT_TEMPLATE}" ]] || { echo -e "${RED}Template systemd não encontrado: ${UNIT_TEMPLATE}${RESET}"; exit 1; }
 
 mkdir -p "$(dirname "$PORTS_FILE")" "$ENV_DIR"
 touch "$PORTS_FILE"
 chmod 600 "$PORTS_FILE"
+chmod 700 "$ENV_DIR"
 
 valid_port() {
   [[ "$1" =~ ^[0-9]+$ ]] || return 1
   (( $1 >= 1 && $1 <= 65535 )) || return 1
 }
 
-unit_name() { echo "proxy@${1}.service"; }
-unit_template_path() { echo "${UNIT_DIR}/proxy@.service"; }
+svc_name() { echo "proxy@${1}.service"; }
 env_path() { echo "${ENV_DIR}/proxy${1}.env"; }
 
 is_port_in_use() {
@@ -51,10 +52,8 @@ is_port_in_use() {
   return 1
 }
 
-# Escreve STATUS de forma segura para EnvironmentFile.
-# Formato: STATUS='...'
-# - troca CR/LF por espaço
-# - usa escaping de aspas simples compatível com shell: ' -> '\'' (fecha, escapa, reabre)
+# Escreve STATUS de forma segura para EnvironmentFile:
+# STATUS='...'
 write_env_file() {
   local port="$1"
   local status="$2"
@@ -65,7 +64,7 @@ write_env_file() {
   status="${status//$'\n'/ }"
   status="${status:0:128}"
 
-  # escape para single-quote
+  # escape para aspas simples: ' -> '\'' (fecha, escapa, reabre)
   local esc
   esc="$(printf "%s" "$status" | sed "s/'/'\\\\''/g")"
 
@@ -74,48 +73,6 @@ write_env_file() {
 STATUS='$esc'
 EOF
   chmod 600 "$p"
-}
-
-ensure_unit_template() {
-  local path
-  path="$(unit_template_path)"
-
-  if [[ -f "$path" ]]; then
-    return 0
-  fi
-
-  cat >"$path" <<'EOF'
-[Unit]
-Description=RustyProxy instance on port %i
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-EnvironmentFile=/etc/rustyproxy/proxy%i.env
-ExecStart=/opt/rustyproxy/proxy --port %i --status ${STATUS}
-Restart=always
-RestartSec=2
-LimitNOFILE=1048576
-
-# Hardening (ajuste se precisar)
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-LockPersonality=true
-RestrictSUIDSGID=true
-RestrictRealtime=true
-MemoryDenyWriteExecute=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
 }
 
 upsert_port_record() {
@@ -144,11 +101,10 @@ add_proxy_port() {
     return
   fi
 
-  ensure_unit_template
   write_env_file "$port" "$status"
 
-  systemctl enable "$(unit_name "$port")" >/dev/null
-  systemctl restart "$(unit_name "$port")"
+  systemctl enable "$(svc_name "$port")" >/dev/null
+  systemctl restart "$(svc_name "$port")"
 
   upsert_port_record "$port" "$status"
   echo -e "${GREEN}✅ PORTA $port ATIVADA COM SUCESSO.${RESET}"
@@ -158,8 +114,8 @@ del_proxy_port() {
   local port="$1"
   valid_port "$port" || { echo -e "${RED}Porta inválida (1-65535).${RESET}"; return; }
 
-  systemctl stop "$(unit_name "$port")" >/dev/null 2>&1 || true
-  systemctl disable "$(unit_name "$port")" >/dev/null 2>&1 || true
+  systemctl stop "$(svc_name "$port")" >/dev/null 2>&1 || true
+  systemctl disable "$(svc_name "$port")" >/dev/null 2>&1 || true
 
   rm -f "$(env_path "$port")"
   remove_port_record "$port"
@@ -172,17 +128,14 @@ update_proxy_status() {
   local new_status="$2"
 
   valid_port "$port" || { echo -e "${RED}Porta inválida (1-65535).${RESET}"; return; }
-
-  if [[ ! -f "$(unit_template_path)" ]]; then
-    echo -e "${RED}Unit template não encontrado. Ative uma porta primeiro.${RESET}"
-    return
-  fi
+  [[ -n "${new_status}" ]] || { echo -e "${RED}Status não pode ser vazio.${RESET}"; return; }
 
   write_env_file "$port" "$new_status"
-  systemctl restart "$(unit_name "$port")" >/dev/null 2>&1 || {
-    echo -e "${YELLOW}⚠️ Serviço não estava ativo, ativando...${RESET}"
-    systemctl enable "$(unit_name "$port")" >/dev/null
-    systemctl restart "$(unit_name "$port")"
+
+  # se não existir serviço habilitado ainda, enable+start
+  systemctl restart "$(svc_name "$port")" >/dev/null 2>&1 || {
+    systemctl enable "$(svc_name "$port")" >/dev/null
+    systemctl restart "$(svc_name "$port")"
   }
 
   upsert_port_record "$port" "$new_status"
@@ -199,18 +152,16 @@ restart_all_proxies() {
   echo "🔃 REINICIANDO TODAS AS PORTAS DO PROXY..."
   sleep 1
 
-  ensure_unit_template
-
   while IFS='|' read -r port status; do
     [[ -n "${port:-}" ]] || continue
     valid_port "$port" || continue
 
-    # garante env file consistente com o arquivo
+    # garante env consistente
     write_env_file "$port" "${status:-@RustyManager}"
 
-    systemctl restart "$(unit_name "$port")" >/dev/null 2>&1 || {
-      systemctl enable "$(unit_name "$port")" >/dev/null
-      systemctl restart "$(unit_name "$port")"
+    systemctl restart "$(svc_name "$port")" >/dev/null 2>&1 || {
+      systemctl enable "$(svc_name "$port")" >/dev/null
+      systemctl restart "$(svc_name "$port")"
     }
   done < "$PORTS_FILE"
 
@@ -228,18 +179,19 @@ uninstall_rustyproxy() {
     while IFS='|' read -r port _; do
       [[ -n "${port:-}" ]] || continue
       valid_port "$port" || continue
-      systemctl stop "$(unit_name "$port")" >/dev/null 2>&1 || true
-      systemctl disable "$(unit_name "$port")" >/dev/null 2>&1 || true
+      systemctl stop "$(svc_name "$port")" >/dev/null 2>&1 || true
+      systemctl disable "$(svc_name "$port")" >/dev/null 2>&1 || true
       rm -f "$(env_path "$port")"
     done < "$PORTS_FILE"
   fi
 
-  # Remove template e env dir
-  rm -f "$(unit_template_path)" || true
+  # Remove envs órfãos e template (instalado pelo install.sh)
   rm -rf "$ENV_DIR" || true
+  rm -f "$UNIT_TEMPLATE" || true
   systemctl daemon-reload
 
   rm -rf /opt/rustyproxy
+  rm -f /usr/local/bin/rustyproxy /usr/local/bin/rustyproxyctl || true
 
   echo -e "\033[0;36m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m"
   echo -e "\033[1;36m┃\E[44;1;37m RUSTY PROXY DESINSTALADO COM SUCESSO. \E[0m\033[0;36m┃"
@@ -311,7 +263,6 @@ show_menu() {
         read -r -p "━➤ DIGITE A PORTA (1-65535): " port
       done
       read -r -p "━➤ DIGITE O NOVO STATUS (pode ter espaços): " new_status
-      [[ -n "${new_status}" ]] || { echo -e "${RED}Status não pode ser vazio.${RESET}"; sleep 1; return; }
       update_proxy_status "$port" "$new_status"
       read -r -p "━➤ OK. PRESSIONE ENTER." dummy
       ;;
