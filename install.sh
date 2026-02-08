@@ -190,7 +190,14 @@ EOF
 }
 
 setup_links() {
+  # (NOVO) garante permissões + link simbólico
+  run chmod 0755 "${RUSTY_DIR}/menu"
   run ln -sf "${RUSTY_DIR}/menu" /usr/local/bin/rustyproxy
+
+  # garante também a permissão do CLI
+  if [[ -f /usr/local/bin/rustyproxyctl ]]; then
+    run chmod 0755 /usr/local/bin/rustyproxyctl
+  fi
 }
 
 install_rustyproxy() {
@@ -209,11 +216,10 @@ install_rustyproxy() {
   run cargo build --release --jobs "$(nproc)"
   popd >/dev/null
 
-  # --- CORREÇÃO PRINCIPAL: detectar o binário automaticamente ---
+  # --- detectar o binário automaticamente ---
   local release_dir="${CLONE_DIR}/RustyProxy/target/release"
   local bin_path=""
 
-  # tenta achar executável em target/release (ignora artefatos comuns)
   bin_path="$(find "${release_dir}" -maxdepth 1 -type f -executable \
     ! -name '*.d' ! -name '*.rlib' ! -name '*.so' ! -name '*.a' 2>/dev/null | head -n 1 || true)"
 
@@ -274,15 +280,14 @@ main() {
   cleanup
   increment_step
 
+  # (NOVO) Mensagem final limpa e bonita
   clear
   echo -e " "
-  echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
-  echo -e "\E[44;1;37m        INSTALAÇÃO FINALIZADA COM SUCESSO               \E[0m"
-  echo -e "\033[0;34m--------------------------------------------------------------\033[0m"
+  echo -e "\033[1;34m==============================================================\033[0m"
+  echo -e "\033[1;34m\033[1m                INSTALAÇÃO CONCLUÍDA COM SUCESSO               \033[0m"
+  echo -e "\033[1;34m==============================================================\033[0m"
   echo -e " "
-  echo -e "\033[1;33mLOG:\033[0m ${LOG_FILE}"
-  echo -e "\033[1;33mMENU:\033[0m  rustyproxy"
-  echo -e "\033[1;33mCLI:\033[0m   rustyproxyctl status | rustyproxyctl list | rustyproxyctl logs <porta>"
+  echo -e "\033[1;34m\033[1mDIGITE:\033[0m \033[1;37mRUSTYPROXY\033[0m"
   echo -e " "
 }
 
