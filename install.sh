@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instalação Rusty Proxy (Opção B - EnvironmentFile)
+# Instalação Rusty Proxy (Opção B - EnvironmentFile) - corrigido
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -28,7 +28,7 @@ show_progress() {
 error_exit() {
   echo -e "\nErro: $1"
   echo -e "\n--- Últimas linhas do log (${LOG_FILE}) ---"
-  tail -n 80 "${LOG_FILE}" 2>/dev/null || true
+  tail -n 120 "${LOG_FILE}" 2>/dev/null || true
   exit 1
 }
 
@@ -96,31 +96,6 @@ ensure_rust() {
   command -v cargo >/dev/null 2>&1 || error_exit "Falha ao disponibilizar cargo após rustup."
 }
 
-install_rustyproxy() {
-  rm -rf "${CLONE_DIR}" || true
-  run git clone --branch "${REPO_REF}" "${REPO_URL}" "${CLONE_DIR}"
-
-  run mkdir -p "${RUSTY_DIR}" "${ENV_DIR}"
-
-  # instala menu (opção B)
-  [[ -f "${CLONE_DIR}/menu.sh" ]] || error_exit "menu.sh não encontrado no repo."
-  run install -m 0755 "${CLONE_DIR}/menu.sh" "${RUSTY_DIR}/menu"
-
-  # build Rust
-  [[ -d "${CLONE_DIR}/RustyProxy" ]] || error_exit "Diretório Rust não encontrado: ${CLONE_DIR}/RustyProxy"
-  pushd "${CLONE_DIR}/RustyProxy" >/dev/null
-  run cargo build --release --jobs "$(nproc)"
-  popd >/dev/null
-
-  [[ -f "${CLONE_DIR}/RustyProxy/target/release/RustyProxy" ]] || error_exit "Binário não encontrado em target/release/RustyProxy"
-  run install -m 0755 "${CLONE_DIR}/RustyProxy/target/release/RustyProxy" "${RUSTY_DIR}/proxy"
-
-  # arquivos de controle
-  run touch "${PORTS_FILE}"
-  run chmod 600 "${PORTS_FILE}"
-  run chmod 700 "${ENV_DIR}"
-}
-
 install_unit_template() {
   # template systemd para proxy@PORT.service
   cat >"${UNIT_TEMPLATE}" <<'EOF'
@@ -158,7 +133,6 @@ EOF
 }
 
 install_cli() {
-  # CLI simples para status/listagem sem entrar no menu
   cat >/usr/local/bin/rustyproxyctl <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -216,8 +190,41 @@ EOF
 }
 
 setup_links() {
-  # link do menu principal
   run ln -sf "${RUSTY_DIR}/menu" /usr/local/bin/rustyproxy
+}
+
+install_rustyproxy() {
+  rm -rf "${CLONE_DIR}" || true
+  run git clone --branch "${REPO_REF}" "${REPO_URL}" "${CLONE_DIR}"
+
+  run mkdir -p "${RUSTY_DIR}" "${ENV_DIR}"
+
+  # instala menu (o menu deve ser o da Opção B)
+  [[ -f "${CLONE_DIR}/menu.sh" ]] || error_exit "menu.sh não encontrado no repo."
+  run install -m 0755 "${CLONE_DIR}/menu.sh" "${RUSTY_DIR}/menu"
+
+  # build Rust
+  [[ -d "${CLONE_DIR}/RustyProxy" ]] || error_exit "Diretório Rust não encontrado: ${CLONE_DIR}/RustyProxy"
+  pushd "${CLONE_DIR}/RustyProxy" >/dev/null
+  run cargo build --release --jobs "$(nproc)"
+  popd >/dev/null
+
+  # --- CORREÇÃO PRINCIPAL: detectar o binário automaticamente ---
+  local release_dir="${CLONE_DIR}/RustyProxy/target/release"
+  local bin_path=""
+
+  # tenta achar executável em target/release (ignora artefatos comuns)
+  bin_path="$(find "${release_dir}" -maxdepth 1 -type f -executable \
+    ! -name '*.d' ! -name '*.rlib' ! -name '*.so' ! -name '*.a' 2>/dev/null | head -n 1 || true)"
+
+  [[ -n "${bin_path}" ]] || error_exit "Nenhum binário executável encontrado em ${release_dir}"
+
+  run install -m 0755 "${bin_path}" "${RUSTY_DIR}/proxy"
+
+  # arquivos de controle
+  run touch "${PORTS_FILE}"
+  run chmod 600 "${PORTS_FILE}"
+  run chmod 700 "${ENV_DIR}"
 }
 
 cleanup() {
